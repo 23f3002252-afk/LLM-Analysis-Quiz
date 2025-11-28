@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Test script for LLM Analysis Quiz project
+Test script for LLM Analysis Quiz project (Groq version)
 Run this to verify your setup before deployment
 """
 
@@ -17,7 +17,7 @@ def test_environment():
     """Test that all required environment variables are set"""
     print("Testing environment variables...")
     
-    required_vars = ['STUDENT_EMAIL', 'STUDENT_SECRET', 'ANTHROPIC_API_KEY']
+    required_vars = ['STUDENT_EMAIL', 'STUDENT_SECRET', 'GROQ_API_KEY']
     missing = []
     
     for var in required_vars:
@@ -47,7 +47,7 @@ def test_dependencies():
     
     required_packages = [
         'flask',
-        'anthropic',
+        'groq',
         'selenium',
         'requests',
         'dotenv'
@@ -96,40 +96,42 @@ def test_chrome_driver():
         print(f"  ✗ Chrome/ChromeDriver error: {e}")
         print("\n❌ Chrome setup failed")
         print("Install Chrome and ChromeDriver:")
-        print("  Ubuntu: sudo apt-get install chromium-browser chromium-chromedriver")
-        print("  macOS: brew install --cask google-chrome && brew install chromedriver")
+        print("  macOS: brew install chromedriver")
+        print("  Then: xattr -d com.apple.quarantine $(which chromedriver)")
         return False
 
-def test_anthropic_api():
-    """Test Anthropic API connectivity"""
-    print("Testing Anthropic API...")
+def test_groq_api():
+    """Test Groq API connectivity"""
+    print("Testing Groq API...")
     
     try:
-        import anthropic
+        from groq import Groq
         
-        client = anthropic.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
+        client = Groq(api_key=os.getenv('GROQ_API_KEY'))
         
-        message = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=50,
-            messages=[{"role": "user", "content": "Reply with just 'OK'"}]
+        response = client.chat.completions.create(
+            model="llama-3.1-70b-versatile",
+            messages=[{"role": "user", "content": "Reply with just 'OK'"}],
+            max_tokens=10
         )
         
-        response = message.content[0].text.strip()
+        response_text = response.choices[0].message.content.strip()
         
-        if 'OK' in response.upper():
+        if 'OK' in response_text.upper():
             print(f"  ✓ API connection successful")
-            print(f"  ✓ Response received: {response}")
-            print("\n✅ Anthropic API is working\n")
+            print(f"  ✓ Response received: {response_text}")
+            print(f"  ✓ Model: Llama 3.1 70B")
+            print("\n✅ Groq API is working\n")
             return True
         else:
-            print(f"  ⚠ Unexpected response: {response}")
+            print(f"  ⚠ Unexpected response: {response_text}")
             return False
             
     except Exception as e:
         print(f"  ✗ API error: {e}")
-        print("\n❌ Anthropic API test failed")
-        print("Check your ANTHROPIC_API_KEY")
+        print("\n❌ Groq API test failed")
+        print("Check your GROQ_API_KEY")
+        print("Get one at: https://console.groq.com/keys")
         return False
 
 def test_local_server():
@@ -228,7 +230,7 @@ def test_secret_validation():
 def run_all_tests():
     """Run all tests and report results"""
     print("="*60)
-    print("LLM Analysis Quiz - Setup Verification")
+    print("LLM Analysis Quiz - Setup Verification (Groq Version)")
     print("="*60 + "\n")
     
     results = {}
@@ -239,7 +241,7 @@ def run_all_tests():
     
     # Important tests (should pass)
     results['chrome'] = test_chrome_driver()
-    results['anthropic'] = test_anthropic_api()
+    results['groq'] = test_groq_api()
     
     # Optional tests (nice to have)
     results['server'] = test_local_server()
@@ -260,13 +262,13 @@ def run_all_tests():
     print(f"❌ Failed: {failed}")
     print(f"⚠️  Skipped: {skipped}")
     
-    critical_tests = ['environment', 'dependencies', 'chrome', 'anthropic']
+    critical_tests = ['environment', 'dependencies', 'chrome', 'groq']
     critical_passed = all(results.get(t, False) for t in critical_tests)
     
     if critical_passed:
         print("\n🎉 All critical tests passed! You're ready to deploy.")
         print("\nNext steps:")
-        print("1. Deploy to a cloud platform (Railway, Render, Google Cloud, etc.)")
+        print("1. Deploy to Render.com (Railway is down)")
         print("2. Get your public HTTPS URL")
         print("3. Fill out the Google Form with your URL")
         print("4. Test with: curl -X POST <your-url>/quiz -H 'Content-Type: application/json' -d '{...}'")

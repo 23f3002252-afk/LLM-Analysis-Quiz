@@ -4,7 +4,7 @@ import logging
 from flask import Flask, request, jsonify
 from datetime import datetime
 import threading
-from quiz_solver_groq import GroqQuizSolver
+from quiz_solver import GroqQuizSolver
 
 # Configure logging
 logging.basicConfig(
