@@ -185,7 +185,7 @@ STUDENT_SECRET=your-strong-secret-string
 ANTHROPIC_API_KEY=sk-ant-api03-xxxxx...
 ```
 
-(Optional: `PORT=5000` - Railway sets this automatically)
+(Optional: `PORT=3000` - Railway sets this automatically)
 
 ## URLs Reference
 

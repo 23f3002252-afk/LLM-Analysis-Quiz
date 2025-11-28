@@ -110,7 +110,7 @@ def test_groq_api():
         client = Groq(api_key=os.getenv('GROQ_API_KEY'))
         
         response = client.chat.completions.create(
-            model="llama-3.1-70b-versatile",
+            model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": "Reply with just 'OK'"}],
             max_tokens=10
         )
@@ -140,7 +140,7 @@ def test_local_server():
     
     # Try to connect to local server
     try:
-        response = requests.get('http://localhost:5000/health', timeout=2)
+        response = requests.get('http://localhost:3000/health', timeout=2)
         
         if response.status_code == 200:
             print("  ✓ Server is running")
@@ -172,7 +172,7 @@ def test_quiz_endpoint():
         }
         
         response = requests.post(
-            'http://localhost:5000/quiz',
+            'http://localhost:3000/quiz',
             json=payload,
             timeout=5
         )
@@ -206,7 +206,7 @@ def test_secret_validation():
         }
         
         response = requests.post(
-            'http://localhost:5000/quiz',
+            'http://localhost:3000/quiz',
             json=payload,
             timeout=5
         )

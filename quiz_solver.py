@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 class GroqQuizSolver:
     """
-    Advanced quiz solver using Groq (Llama 3.1 70B) - Super fast and free!
+    Advanced quiz solver using Groq (Llama 3.3 70B) - Super fast and free!
     """
     
     def __init__(self, email, secret):
@@ -28,7 +28,7 @@ class GroqQuizSolver:
         
         # Initialize Groq client
         self.client = Groq(api_key=self.api_key)
-        self.model = "llama-3.1-70b-versatile"  # Best model for reasoning
+        self.model = "llama-3.3-70b-versatile"  # Best model for reasoning
         
         self.start_time = None
         self.current_url = None
@@ -111,8 +111,8 @@ class GroqQuizSolver:
                     return None
     
     def solve_with_groq(self, quiz_content):
-        """Use Groq (Llama 3.1 70B) to understand and solve the quiz"""
-        logger.info("🤖 Analyzing quiz with Groq (Llama 3.1 70B)")
+        """Use Groq (Llama 3.3 70B) to understand and solve the quiz"""
+        logger.info("🤖 Analyzing quiz with Groq (Llama 3.3 70B)")
         
         system_prompt = """You are an expert data analyst and problem solver. Your task is to:
 1. Understand the quiz question completely
@@ -404,7 +404,7 @@ Return JSON:
         correct_count = 0
         
         logger.info(f"\n{'='*70}")
-        logger.info(f"🚀 Starting Quiz Chain with Groq (Llama 3.1 70B)")
+        logger.info(f"🚀 Starting Quiz Chain with Groq (Llama 3.3 70B)")
         logger.info(f"📍 Initial URL: {initial_url}")
         logger.info(f"⚡ Super fast inference!")
         logger.info(f"{'='*70}\n")
@@ -450,5 +450,5 @@ Return JSON:
         logger.info(f"❌ Incorrect: {quiz_count - correct_count}")
         logger.info(f"📈 Success: {success_rate:.1f}%")
         logger.info(f"⏱️  Time: {elapsed:.1f}s")
-        logger.info(f"🤖 Model: Groq Llama 3.1 70B")
+        logger.info(f"🤖 Model: Groq Llama 3.3 70B")
         logger.info(f"{'='*70}\n")

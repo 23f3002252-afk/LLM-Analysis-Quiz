@@ -16,8 +16,8 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # Load configuration
-EMAIL = os.getenv('STUDENT_EMAIL', 'your-email@example.com')
-SECRET = os.getenv('STUDENT_SECRET', 'your-secret-string')
+EMAIL = os.getenv('STUDENT_EMAIL', '23f3002252@ds.study.iitm.ac.in')
+SECRET = os.getenv('STUDENT_SECRET', 'SECRET_KEY')
 
 def solve_quiz_async(email, secret, url):
     """Solve quiz in background thread"""
@@ -67,7 +67,7 @@ def handle_quiz():
         # Return immediate 200
         return jsonify({
             "status": "accepted",
-            "message": "Quiz solving started with Groq (Llama 3.1 70B)",
+            "message": "Quiz solving started with Groq (Llama 3.3 70B)",
             "timestamp": datetime.now().isoformat()
         }), 200
         
@@ -83,11 +83,11 @@ def health_check():
     """Health check endpoint"""
     return jsonify({
         "status": "healthy",
-        "ai_model": "Groq Llama 3.1 70B Versatile",
+        "ai_model": "Groq Llama 3.3 70B Versatile",
         "speed": "Super fast! ⚡",
         "timestamp": datetime.now().isoformat()
     }), 200
 
 if __name__ == '__main__':
-    port = int(os.getenv('PORT', 5000))
+    port = int(os.getenv('PORT', 3000))
     app.run(host='0.0.0.0', port=port, debug=False)

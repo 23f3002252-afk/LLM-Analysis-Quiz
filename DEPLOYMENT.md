@@ -33,7 +33,7 @@ Railway offers free tier and simple deployment with Chrome support.
      STUDENT_EMAIL=your-email@example.com
      STUDENT_SECRET=your-secret-string
      ANTHROPIC_API_KEY=sk-ant-api03-...
-     PORT=5000
+     PORT=3000
      ```
 
 4. **Configure Build**:
