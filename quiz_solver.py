@@ -136,6 +136,12 @@ VISIBLE TEXT:
 LINKS FOUND:
 {json.dumps(quiz_content.get('links', []), indent=2)}
 
+Analyze this carefully. Look for:
+1. What question is being asked
+2. What data or calculations are needed
+3. What format the answer should be in (look for examples in the text)
+4. Where to submit
+
 Please analyze this quiz and provide a structured solution in JSON format:
 {{
     "understanding": "What is the question asking?",
@@ -151,10 +157,12 @@ Please analyze this quiz and provide a structured solution in JSON format:
 }}
 
 IMPORTANT: 
-- If you CAN answer from the visible text alone, provide the actual answer and set "needs_external_data" to false
+- ALWAYS provide an actual answer value, even for demo quizzes
+- If the quiz shows example answer format, follow that exact format
+- If you CAN answer from the visible text alone, provide the actual answer (string, number, object, etc.) and set "needs_external_data" to false
 - If you MUST download external files/URLs to answer, set "answer" to null and "needs_external_data" to true
-- For simple demo quizzes with no specific question, you can provide an empty object {{}} as the answer
-- Do NOT say "Cannot be calculated" - use null only when external data is truly required"""
+- Do NOT provide empty objects {{}} unless that's specifically what the quiz asks for
+- Look carefully at the visible text for clues about what answer is expected"""
 
         try:
             messages = [
@@ -384,11 +392,6 @@ Return JSON:
                     if result:
                         answer = result.get('answer')
                         logger.info(f"✅ External data processed, answer: {answer}")
-            
-            # If answer is still null and doesn't need external data, use a default
-            if answer is None and not solution.get('needs_external_data'):
-                logger.warning("⚠️  Answer is null but no external data needed - using empty object")
-                answer = {}  # Default empty answer for demo quizzes
             
             if answer is None:
                 logger.error("❌ No answer determined")
