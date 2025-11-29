@@ -58,6 +58,7 @@ IMPORTANT RULES:
 - The "answer" parameter should be ONLY the actual answer value (string, number, etc.)
 - DO NOT include email, secret, or url in the answer field - those are handled automatically
 - For demo quizzes with no specific question, submit a simple string like "hello" or "demo"
+- For CSV analysis with cutoff: Use GREATER THAN OR EQUAL TO (>=) not just greater than (>)
 
 STRATEGY:
 1. Call "navigate" to read the quiz page
@@ -132,22 +133,34 @@ EXAMPLES:
         """Tool: Analyze CSV data with optional cutoff"""
         logger.info(f"📊 Analyzing data (cutoff: {cutoff})")
         try:
+            # Convert cutoff to int if it's a string
+            if isinstance(cutoff, str):
+                cutoff = int(cutoff)
+            
             # Parse CSV
             df = pd.read_csv(StringIO(data), header=None)
+            logger.info(f"Data shape: {df.shape}, Columns: {df.columns.tolist()}")
             
             if cutoff is not None:
-                # Filter: numbers > cutoff in column 0
-                filtered = df[df[0] > cutoff]
-                result = filtered[0].sum()
-                logger.info(f"Sum of values > {cutoff}: {result}")
-                return str(int(result))
+                # Try >= instead of > (inclusive)
+                filtered = df[df[0] >= cutoff]
+                result_ge = filtered[0].sum()
+                logger.info(f"Sum of values >= {cutoff}: {result_ge}")
+                
+                # Also try > (exclusive) for comparison
+                filtered_gt = df[df[0] > cutoff]
+                result_gt = filtered_gt[0].sum()
+                logger.info(f"Sum of values > {cutoff}: {result_gt}")
+                
+                # Return the >= version (more common)
+                return str(int(result_ge))
             else:
                 # Just return sum of column 0
                 result = df[0].sum()
                 return str(int(result))
                 
         except Exception as e:
-            logger.error(f"Analysis error: {e}")
+            logger.error(f"Analysis error: {e}", exc_info=True)
             return f"Error: {e}"
     
     def submit_answer(self, answer):
