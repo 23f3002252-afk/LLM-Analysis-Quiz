@@ -168,45 +168,82 @@ RESPONSE FORMAT (STRICT JSON):
             return f"Error: {e}"
     
     def analyze_image(self, image_url, question="What do you see?"):
-        """Analyze image using Groq Vision"""
+        """Analyze image using Groq Vision or PIL fallback"""
         logger.info(f"🖼️  Analyzing: {image_url}")
         try:
-            # Download and encode image
+            # Download image first
             response = requests.get(image_url, timeout=30)
             response.raise_for_status()
-            b64_image = base64.b64encode(response.content).decode('utf-8')
             
-            # Use Groq vision model
-            completion = self.client.chat.completions.create(
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": question},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{b64_image}"
+            # Try Groq vision model first
+            try:
+                b64_image = base64.b64encode(response.content).decode('utf-8')
+                
+                completion = self.client.chat.completions.create(
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": question},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/jpeg;base64,{b64_image}"
+                                }
                             }
-                        }
-                    ]
-                }],
-                model="llama-3.2-11b-vision-preview",
-                temperature=0.1
-            )
-            
-            result = completion.choices[0].message.content
-            logger.info(f"✅ Vision: {result}")
-            return f"IMAGE ANALYSIS: {result}"
-            
+                        ]
+                    }],
+                    model="llama-3.2-90b-vision-preview",
+                    temperature=0.1
+                )
+                
+                result = completion.choices[0].message.content
+                logger.info(f"✅ Vision: {result}")
+                return f"IMAGE ANALYSIS: {result}"
+            except Exception as vision_error:
+                logger.warning(f"Vision API failed: {vision_error}, using PIL fallback")
+                
+                # Fallback: Use PIL to analyze image
+                from PIL import Image
+                from io import BytesIO
+                from collections import Counter
+                
+                img = Image.open(BytesIO(response.content))
+                
+                # For heatmap: find most frequent color
+                if 'heatmap' in image_url or 'color' in question.lower():
+                    pixels = list(img.getdata())
+                    most_common = Counter(pixels).most_common(1)[0][0]
+                    
+                    # Convert to hex
+                    if isinstance(most_common, int):  # Grayscale
+                        hex_color = f"#{most_common:02x}{most_common:02x}{most_common:02x}"
+                    else:  # RGB
+                        hex_color = f"#{most_common[0]:02x}{most_common[1]:02x}{most_common[2]:02x}"
+                    
+                    logger.info(f"✅ PIL Analysis: Most frequent color = {hex_color}")
+                    return f"IMAGE ANALYSIS: Most frequent color is {hex_color}"
+                else:
+                    return f"IMAGE ANALYSIS: {img.size[0]}x{img.size[1]} image, {img.mode} mode"
+                    
         except Exception as e:
-            logger.error(f"Vision error: {e}")
+            logger.error(f"Image analysis error: {e}")
             return f"Error: {e}"
     
     def python_repl(self, code):
         """Execute Python code"""
         logger.info(f"🐍 Executing Python")
         try:
-            prepend = "import pandas as pd\nimport numpy as np\nimport requests\nimport json\n"
+            prepend = """import pandas as pd
+import numpy as np
+import requests
+import json
+from io import BytesIO, StringIO
+try:
+    from PIL import Image
+    from collections import Counter
+except ImportError:
+    pass
+"""
             full_code = prepend + code
             
             result = subprocess.run(
