@@ -51,23 +51,34 @@ class GroqQuizSolver:
 AVAILABLE TOOLS:
 1. "navigate": {"url": "string"} - Scrapes the page, returns text and links
 2. "download_file": {"url": "string"} - Downloads CSV/data files
-3. "analyze_data": {"data": "string", "cutoff": "number"} - Analyzes CSV data with cutoff
-4. "submit_answer": {"answer": "any"} - Submits final answer
+3. "python_repl": {"code": "string"} - Executes Python code (pandas available as pd)
+4. "analyze_data": {"data": "string", "cutoff": "number"} - Analyzes CSV data with cutoff
+5. "submit_answer": {"answer": "any"} - Submits final answer
 
 IMPORTANT RULES:
 - The "answer" parameter should be ONLY the actual answer value (string, number, etc.)
 - DO NOT include email, secret, or url in the answer field - those are handled automatically
 - For demo quizzes with no specific question, submit a simple string like "hello" or "demo"
-- For CSV analysis with cutoff: Use GREATER THAN OR EQUAL TO (>=) not just greater than (>)
+- For CSV analysis: The rule is ALMOST ALWAYS sum of all numbers GREATER THAN (>) the cutoff, NOT >=
 
 STRATEGY:
-1. Call "navigate" to read the quiz page
+1. ALWAYS call "navigate" first to read the quiz page - NEVER skip this step
 2. Look for:
    - Secret codes in text (submit the code as a string)
    - CSV/data file links (download and analyze)
-   - Cutoff values for filtering
-3. For data analysis: Sum of all numbers > cutoff (column 0), submit as integer
+   - Cutoff values for filtering (look for phrases like "cutoff: X")
+3. For data analysis:
+   - Option A: Download CSV then use "python_repl" to analyze:
+     ```python
+     import pandas as pd
+     from io import StringIO
+     df = pd.read_csv(StringIO(data), header=None)
+     filtered = df[df[0] > CUTOFF]
+     print(filtered[0].sum())
+     ```
+   - Option B: Use "analyze_data" tool directly
 4. Submit the answer using "submit_answer" with just the answer value
+5. NEVER submit generic answers like "hello" unless it's clearly a demo quiz
 
 RESPONSE FORMAT (STRICT JSON):
 {
@@ -129,6 +140,37 @@ EXAMPLES:
             logger.error(f"Download error: {e}")
             return f"Error: {e}"
     
+    def python_repl(self, code):
+        """Tool: Execute Python code for data analysis"""
+        logger.info(f"🐍 Executing Python code")
+        try:
+            # Create a safe execution environment
+            local_vars = {
+                'pd': pd,
+                'requests': requests,
+                'StringIO': StringIO
+            }
+            
+            # Capture print output
+            from io import StringIO as SIO
+            import sys
+            old_stdout = sys.stdout
+            sys.stdout = captured_output = SIO()
+            
+            # Execute code
+            exec(code, {"__builtins__": __builtins__}, local_vars)
+            
+            # Get output
+            sys.stdout = old_stdout
+            output = captured_output.getvalue()
+            
+            logger.info(f"Code output: {output}")
+            return output.strip()
+            
+        except Exception as e:
+            logger.error(f"Python execution error: {e}", exc_info=True)
+            return f"Error: {e}"
+    
     def analyze_data(self, data, cutoff=None):
         """Tool: Analyze CSV data with optional cutoff"""
         logger.info(f"📊 Analyzing data (cutoff: {cutoff})")
@@ -139,21 +181,14 @@ EXAMPLES:
             
             # Parse CSV
             df = pd.read_csv(StringIO(data), header=None)
-            logger.info(f"Data shape: {df.shape}, Columns: {df.columns.tolist()}")
+            logger.info(f"Data shape: {df.shape}")
             
             if cutoff is not None:
-                # Try >= instead of > (inclusive)
-                filtered = df[df[0] >= cutoff]
-                result_ge = filtered[0].sum()
-                logger.info(f"Sum of values >= {cutoff}: {result_ge}")
-                
-                # Also try > (exclusive) for comparison
-                filtered_gt = df[df[0] > cutoff]
-                result_gt = filtered_gt[0].sum()
-                logger.info(f"Sum of values > {cutoff}: {result_gt}")
-                
-                # Return the >= version (more common)
-                return str(int(result_ge))
+                # Use > (GREATER THAN, not >=)
+                filtered = df[df[0] > cutoff]
+                result = filtered[0].sum()
+                logger.info(f"Sum of values > {cutoff}: {result}")
+                return str(int(result))
             else:
                 # Just return sum of column 0
                 result = df[0].sum()
@@ -269,6 +304,9 @@ EXAMPLES:
                     
                 elif tool_name == "download_file":
                     result = self.download_file(params.get("url"))
+                    
+                elif tool_name == "python_repl":
+                    result = self.python_repl(params.get("code"))
                     
                 elif tool_name == "analyze_data":
                     result = self.analyze_data(
