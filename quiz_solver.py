@@ -10,13 +10,13 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from groq import Groq
+from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
 class GroqQuizSolver:
     """
-    Advanced quiz solver using Groq (Llama 3.3 70B) - Super fast and free!
+    Quiz solver using Groq via OpenAI-compatible API (more stable!)
     """
     
     def __init__(self, email, secret):
@@ -26,9 +26,12 @@ class GroqQuizSolver:
         if not self.api_key:
             raise ValueError("GROQ_API_KEY environment variable not set")
         
-        # Initialize Groq client
-        self.client = Groq(api_key=self.api_key)
-        self.model = "llama-3.3-70b-versatile"  # Best model for reasoning
+        # Use OpenAI client with Groq endpoint - much more stable!
+        self.client = OpenAI(
+            api_key=self.api_key,
+            base_url="https://api.groq.com/openai/v1"
+        )
+        self.model = "llama-3.3-70b-versatile"
         
         self.start_time = None
         self.current_url = None
@@ -111,7 +114,7 @@ class GroqQuizSolver:
                     return None
     
     def solve_with_groq(self, quiz_content):
-        """Use Groq (Llama 3.3 70B) to understand and solve the quiz"""
+        """Use Groq (via OpenAI client) to understand and solve the quiz"""
         logger.info("🤖 Analyzing quiz with Groq (Llama 3.3 70B)")
         
         system_prompt = """You are an expert data analyst and problem solver. Your task is to:
@@ -164,8 +167,7 @@ If you can answer immediately from the visible text, provide the answer directly
                 model=self.model,
                 messages=messages,
                 temperature=0.1,
-                max_tokens=4096,
-                top_p=0.95
+                max_tokens=4096
             )
             
             response_text = response.choices[0].message.content
@@ -229,7 +231,6 @@ If you can answer immediately from the visible text, provide the answer directly
         if not file_content:
             return None
         
-        # For text-based files, include content
         prompt = f"""I've downloaded a {file_type} file. Here's what I need to do:
 
 Analysis Required: {analysis_needed}
@@ -406,7 +407,7 @@ Return JSON:
         logger.info(f"\n{'='*70}")
         logger.info(f"🚀 Starting Quiz Chain with Groq (Llama 3.3 70B)")
         logger.info(f"📍 Initial URL: {initial_url}")
-        logger.info(f"⚡ Super fast inference!")
+        logger.info(f"⚡ Using OpenAI-compatible API (stable!)")
         logger.info(f"{'='*70}\n")
         
         while current_url and self.check_time_limit():
@@ -450,5 +451,5 @@ Return JSON:
         logger.info(f"❌ Incorrect: {quiz_count - correct_count}")
         logger.info(f"📈 Success: {success_rate:.1f}%")
         logger.info(f"⏱️  Time: {elapsed:.1f}s")
-        logger.info(f"🤖 Model: Groq Llama 3.3 70B")
+        logger.info(f"🤖 Model: Groq Llama 3.3 70B (via OpenAI API)")
         logger.info(f"{'='*70}\n")
