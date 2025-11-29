@@ -54,22 +54,32 @@ AVAILABLE TOOLS:
 3. "analyze_data": {"data": "string", "cutoff": "number"} - Analyzes CSV data with cutoff
 4. "submit_answer": {"answer": "any"} - Submits final answer
 
+IMPORTANT RULES:
+- The "answer" parameter should be ONLY the actual answer value (string, number, etc.)
+- DO NOT include email, secret, or url in the answer field - those are handled automatically
+- For demo quizzes with no specific question, submit a simple string like "hello" or "demo"
+
 STRATEGY:
 1. Call "navigate" to read the quiz page
 2. Look for:
-   - Secret codes in text (submit directly)
+   - Secret codes in text (submit the code as a string)
    - CSV/data file links (download and analyze)
    - Cutoff values for filtering
-   - Submit URL (usually https://tds-llm-analysis.s-anand.net/submit)
-3. For data analysis: Sum of all numbers > cutoff (usually column 0)
-4. Submit the answer
+3. For data analysis: Sum of all numbers > cutoff (column 0), submit as integer
+4. Submit the answer using "submit_answer" with just the answer value
 
 RESPONSE FORMAT (STRICT JSON):
 {
   "thought": "Your reasoning",
   "tool_name": "tool_name",
   "parameters": {...}
-}"""
+}
+
+EXAMPLES:
+- For demo: {"tool_name": "submit_answer", "parameters": {"answer": "hello"}}
+- For secret code: {"tool_name": "submit_answer", "parameters": {"answer": "SECRET123"}}
+- For data sum: {"tool_name": "submit_answer", "parameters": {"answer": 42}}
+"""
     
     def get_browser(self):
         """Initialize headless Chrome"""
