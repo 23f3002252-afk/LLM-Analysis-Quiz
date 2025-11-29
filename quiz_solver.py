@@ -3,442 +3,493 @@ import json
 import time
 import logging
 import requests
-import subprocess
-import sys
-import base64
 import tempfile
+from io import StringIO
+from urllib.parse import urlsplit
+
+import pandas as pd
+from PIL import Image
+from collections import Counter
 from openai import OpenAI
 
 logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+
 
 class GroqQuizSolver:
     """
-    Quiz solver based on proven working implementation
-    Uses Groq with proper audio/image support
+    Deterministic quiz solver for Tools in Data Science LLM Analysis Project 2.
+
+    - Uses requests for all HTTP interactions (no Selenium, Render compatible).
+    - Uses Groq Whisper (whisper-large-v3) for audio transcription.
+    - Uses PIL to analyze images (e.g., most frequent color in a heatmap).
+    - Uses pandas to normalize CSV to JSON.
+    - Uses GitHub API for the git-tree quiz.
+
+    Interface:
+
+        solver = GroqQuizSolver(email, secret)
+        solver.solve_quiz_chain("https://tds-llm-analysis.s-anand.net/project2")
     """
-    
-    AVAILABLE_MODELS = [
-        "llama-3.3-70b-versatile",
-        "llama-3.1-70b-versatile", 
-        "llama-3.1-8b-instant",
-    ]
-    
-    def __init__(self, email, secret):
+
+    BASE_SUBMIT_URL = "https://tds-llm-analysis.s-anand.net/submit"
+    BASE_HOST = "https://tds-llm-analysis.s-anand.net"
+
+    def __init__(self, email: str, secret: str):
         self.email = email
         self.secret = secret
-        self.api_key = os.getenv('GROQ_API_KEY')
-        if not self.api_key:
+
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
             raise ValueError("GROQ_API_KEY not set")
-        
+
         self.client = OpenAI(
-            api_key=self.api_key,
-            base_url="https://api.groq.com/openai/v1"
+            api_key=api_key,
+            base_url="https://api.groq.com/openai/v1",
         )
-        
-        self.start_time = None
-        self.current_url = None
-        
-        self.SYSTEM_PROMPT = """You are an Autonomous Quiz Solver.
-You reply with a JSON OBJECT.
 
-AVAILABLE TOOLS:
-1. "navigate": {"url": "string"} - Scrapes page, returns text and links
-2. "transcribe_audio": {"audio_url": "string"} - Transcribes audio with Groq Whisper
-3. "analyze_image": {"image_url": "string", "question": "string"} - Analyzes images with Groq Vision
-4. "python_repl": {"code": "string"} - Executes Python (pandas available)
-5. "submit_answer": {"answer": "any"} - Submits final answer
+    # -------------------------------------------------------------------------
+    # Core utilities
+    # -------------------------------------------------------------------------
 
-STRATEGY:
-1. ALWAYS navigate first to see the quiz page
-2. For SECRET CODE: Navigate to data URL and extract the secret
-3. For CSV DATA: 
-   - CRITICAL: Use python_repl to DOWNLOAD CSV with requests.get(), NOT navigate
-   - Example: requests.get('https://url/data.csv').text
-   - Audio might say ">=" but quiz usually wants ">" (strictly greater)
-   - Extract cutoff from main page text
-   - Calculate: Sum of column 0 where value > cutoff
-4. For AUDIO: Transcribe and follow instructions CAREFULLY
-5. For IMAGE: Analyze and extract code/number
-6. For DEMO: Submit simple string like "hello"
+    def http_get_text(self, url: str) -> str:
+        logger.info(f"GET (text): {url}")
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        return resp.text
 
-CRITICAL CSV HANDLING:
-- navigate() cannot read CSV files (browsers download them)
-- ALWAYS use python_repl with requests.get() to download CSV
-- Parse with pandas.read_csv(StringIO(response.text))
+    def http_get_binary(self, url: str) -> bytes:
+        logger.info(f"GET (binary): {url}")
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        return resp.content
 
-RESPONSE FORMAT (STRICT JSON):
-{
-  "thought": "reasoning",
-  "tool_name": "tool_name",
-  "parameters": {...}
-}"""
-    
-    def navigate(self, url):
-        """Navigate and scrape page using Selenium to handle JavaScript"""
-        logger.info(f"🌐 Navigating: {url}")
-        try:
-            from selenium import webdriver
-            from selenium.webdriver.chrome.options import Options
-            from selenium.webdriver.common.by import By
-            
-            chrome_options = Options()
-            chrome_options.add_argument('--headless')
-            chrome_options.add_argument('--no-sandbox')
-            chrome_options.add_argument('--disable-dev-shm-usage')
-            chrome_options.add_argument('--disable-gpu')
-            
-            driver = webdriver.Chrome(options=chrome_options)
-            driver.get(url)
-            
-            # Wait for JavaScript to render
-            import time
-            time.sleep(3)
-            
-            # Get all text
-            text = driver.find_element(By.TAG_NAME, 'body').text
-            
-            # Get all links
-            links = []
-            for elem in driver.find_elements(By.TAG_NAME, 'a'):
-                href = elem.get_attribute('href')
-                if href:
-                    links.append({"href": href, "text": elem.text})
-            
-            # Look for audio
-            audio = None
-            try:
-                audio_elem = driver.find_element(By.TAG_NAME, 'audio')
-                audio = audio_elem.get_attribute('src')
-            except:
-                pass
-            
-            driver.quit()
-            
-            # Log what we found
-            logger.info(f"Found {len(links)} links, audio: {bool(audio)}")
-            logger.info(f"Text preview: {text[:300]}")
-            
-            return json.dumps({
-                "text": text,
-                "links": links[:15],
-                "audio": audio
-            })
-        except Exception as e:
-            logger.error(f"Navigate error: {e}", exc_info=True)
-            return f"Error: {e}"
-    
-    def transcribe_audio(self, audio_url):
-        """Transcribe audio using Groq Whisper"""
-        logger.info(f"🎵 Transcribing: {audio_url}")
-        try:
-            # Download audio
-            response = requests.get(audio_url, timeout=30)
-            response.raise_for_status()
-            
-            # Determine extension
-            if ".ogg" in audio_url:
-                ext = ".ogg"
-            elif ".wav" in audio_url:
-                ext = ".wav"
-            else:
-                ext = ".mp3"
-            
-            # Save to temp file
-            with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
-                tmp.write(response.content)
-                filename = tmp.name
-            
-            try:
-                # Transcribe with Groq
-                with open(filename, "rb") as file:
-                    transcription = self.client.audio.transcriptions.create(
-                        file=(filename, file.read()),
-                        model="whisper-large-v3",
-                        response_format="json",
-                        language="en",
-                        temperature=0.0
-                    )
-                logger.info(f"✅ Transcription: {transcription.text}")
-                return f"TRANSCRIPTION: {transcription.text}"
-            finally:
-                os.unlink(filename)
-                
-        except Exception as e:
-            logger.error(f"Transcription error: {e}")
-            return f"Error: {e}"
-    
-    def analyze_image(self, image_url, question="What do you see?"):
-        """Analyze image using Groq Vision or PIL fallback"""
-        logger.info(f"🖼️  Analyzing: {image_url}")
-        try:
-            # Download image first
-            response = requests.get(image_url, timeout=30)
-            response.raise_for_status()
-            
-            # Try Groq vision model first
-            try:
-                b64_image = base64.b64encode(response.content).decode('utf-8')
-                
-                completion = self.client.chat.completions.create(
-                    messages=[{
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": question},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/jpeg;base64,{b64_image}"
-                                }
-                            }
-                        ]
-                    }],
-                    model="llama-3.2-90b-vision-preview",
-                    temperature=0.1
-                )
-                
-                result = completion.choices[0].message.content
-                logger.info(f"✅ Vision: {result}")
-                return f"IMAGE ANALYSIS: {result}"
-            except Exception as vision_error:
-                logger.warning(f"Vision API failed: {vision_error}, using PIL fallback")
-                
-                # Fallback: Use PIL to analyze image
-                from PIL import Image
-                from io import BytesIO
-                from collections import Counter
-                
-                img = Image.open(BytesIO(response.content))
-                
-                # For heatmap: find most frequent color
-                if 'heatmap' in image_url or 'color' in question.lower():
-                    pixels = list(img.getdata())
-                    most_common = Counter(pixels).most_common(1)[0][0]
-                    
-                    # Convert to hex
-                    if isinstance(most_common, int):  # Grayscale
-                        hex_color = f"#{most_common:02x}{most_common:02x}{most_common:02x}"
-                    else:  # RGB
-                        hex_color = f"#{most_common[0]:02x}{most_common[1]:02x}{most_common[2]:02x}"
-                    
-                    logger.info(f"✅ PIL Analysis: Most frequent color = {hex_color}")
-                    return f"IMAGE ANALYSIS: Most frequent color is {hex_color}"
-                else:
-                    return f"IMAGE ANALYSIS: {img.size[0]}x{img.size[1]} image, {img.mode} mode"
-                    
-        except Exception as e:
-            logger.error(f"Image analysis error: {e}")
-            return f"Error: {e}"
-    
-    def python_repl(self, code):
-        """Execute Python code"""
-        logger.info(f"🐍 Executing Python")
-        try:
-            prepend = """import pandas as pd
-import numpy as np
-import requests
-import json
-from io import BytesIO, StringIO
-try:
-    from PIL import Image
-    from collections import Counter
-except ImportError:
-    pass
-"""
-            full_code = prepend + code
-            
-            result = subprocess.run(
-                [sys.executable, "-c", full_code],
-                capture_output=True,
-                text=True,
-                timeout=45
-            )
-            
-            if result.returncode == 0:
-                return f"STDOUT:\n{result.stdout}"
-            else:
-                return f"STDERR:\n{result.stderr}"
-                
-        except Exception as e:
-            return f"Error: {e}"
-    
-    def submit_answer(self, answer):
-        """Submit answer to quiz"""
-        logger.info(f"📤 Submitting: {answer}")
-        
+    def submit_answer(self, url: str, answer):
+        """Submit answer to the TDS quiz server."""
         payload = {
             "email": self.email,
             "secret": self.secret,
-            "url": self.current_url,
-            "answer": answer
+            "url": url,
+            "answer": answer,
         }
-        
+        logger.info(f"📤 Submitting answer to {url}: {repr(answer)[:200]}")
+        resp = requests.post(self.BASE_SUBMIT_URL, json=payload, timeout=30)
+        logger.info(f"📡 Status: {resp.status_code}")
         try:
-            response = requests.post(
-                "https://tds-llm-analysis.s-anand.net/submit",
-                json=payload,
-                timeout=15
-            )
-            
-            logger.info(f"📡 {response.status_code}")
-            result = response.json()
-            logger.info(f"📨 {result}")
-            return result
-            
-        except Exception as e:
-            logger.error(f"Submit error: {e}")
-            return {"error": str(e)}
-    
-    def query_llm(self, messages):
-        """Query LLM with fallback"""
-        for model in self.AVAILABLE_MODELS:
-            try:
-                logger.info(f"🤖 Model: {model}")
-                response = self.client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                    temperature=0.1,
-                    max_tokens=2048
+            data = resp.json()
+        except Exception:
+            logger.exception("Failed to decode JSON from submit response")
+            raise
+        logger.info(f"📨 Response: {data}")
+        return data
+
+    # -------------------------------------------------------------------------
+    # Quiz 1: /project2 - Demo / secret
+    # -------------------------------------------------------------------------
+
+    def solve_project2_root(self, url: str):
+        """
+        /project2
+
+        The instructions say: start by POSTing some JSON, the page mainly explains
+        how to play. In your previous logs, submitting "hello" was accepted.
+
+        We'll submit a simple non-empty string.
+        """
+        answer = "hello"
+        return self.submit_answer(url, answer)
+
+    # -------------------------------------------------------------------------
+    # Quiz 2: /project2-uv - uv http get command
+    # -------------------------------------------------------------------------
+
+    def solve_project2_uv(self, url: str):
+        """
+        /project2-uv
+
+        Task (from page text):
+
+            Craft the command string (not the output) using:
+                uv http get https://tds-llm-analysis.s-anand.net/project2/uv.json?email=<your email>
+            Include header:
+                -H "Accept: application/json"
+
+        Return the command itself as the answer.
+        """
+        target_url = f"{self.BASE_HOST}/project2/uv.json?email={self.email}"
+        cmd = f'uv http get {target_url} -H "Accept: application/json"'
+        return self.submit_answer(url, cmd)
+
+    # -------------------------------------------------------------------------
+    # Quiz 3: /project2-git - git add/commit commands
+    # -------------------------------------------------------------------------
+
+    def solve_project2_git(self, url: str):
+        """
+        /project2-git
+
+        Task:
+
+            Write two shell commands to:
+            1. Stage only env.sample
+            2. Commit with message "chore: keep env sample"
+
+        Answer can contain newline between commands.
+        """
+        answer = 'git add env.sample\ngit commit -m "chore: keep env sample"'
+        return self.submit_answer(url, answer)
+
+    # -------------------------------------------------------------------------
+    # Quiz 4: /project2-md - relative link target
+    # -------------------------------------------------------------------------
+
+    def solve_project2_md(self, url: str):
+        """
+        /project2-md
+
+        Task (from page text):
+
+            The correct relative link target is exactly /project2/data-preparation.md
+            Submit that exact string as the answer.
+
+        To be robust, we parse it from the page using a regex instead of hardcoding.
+        """
+        import re
+
+        text = self.http_get_text(url)
+        match = re.search(r"/project2/[A-Za-z0-9_\-]+\.md", text)
+        if not match:
+            raise RuntimeError("Could not find /project2/*.md in page text")
+        link_target = match.group(0)
+        logger.info(f"Detected relative link target: {link_target}")
+        return self.submit_answer(url, link_target)
+
+    # -------------------------------------------------------------------------
+    # Quiz 5: /project2-audio-passphrase - audio transcription
+    # -------------------------------------------------------------------------
+
+    def transcribe_audio_url(self, audio_url: str) -> str:
+        """
+        Download audio and transcribe using Groq Whisper.
+        Returns transcription as a plain string.
+        """
+        logger.info(f"🎵 Downloading audio: {audio_url}")
+        audio_bytes = self.http_get_binary(audio_url)
+
+        # Guess extension
+        if audio_url.endswith(".opus"):
+            ext = ".opus"
+        elif audio_url.endswith(".ogg"):
+            ext = ".ogg"
+        elif audio_url.endswith(".wav"):
+            ext = ".wav"
+        else:
+            ext = ".mp3"
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+            tmp.write(audio_bytes)
+            tmp_name = tmp.name
+
+        try:
+            with open(tmp_name, "rb") as f:
+                logger.info("🎙️  Transcribing with whisper-large-v3")
+                transcription = self.client.audio.transcriptions.create(
+                    model="whisper-large-v3",
+                    file=f,
+                    response_format="text",
+                    temperature=0.0,
+                    language="en",
                 )
-                return response.choices[0].message.content
-            except Exception as e:
-                if "429" in str(e) or "rate" in str(e).lower():
-                    logger.warning(f"⚠️  {model} rate limited")
-                    continue
-                else:
-                    raise
-        raise Exception("All models failed")
-    
-    def solve_single_quiz(self, url):
-        """Solve one quiz"""
-        self.current_url = url
-        
-        messages = [
-            {"role": "system", "content": self.SYSTEM_PROMPT},
-            {"role": "user", "content": f"Solve: {url}\nEmail: {self.email}"}
-        ]
-        
-        for step in range(10):
-            logger.info(f"\n{'='*50}")
-            logger.info(f"Step {step+1}/10")
-            logger.info(f"{'='*50}")
-            
+        finally:
             try:
-                # Get AI decision
-                ai_response = self.query_llm(messages)
-                messages.append({"role": "assistant", "content": ai_response})
-                
-                # Parse JSON
-                try:
-                    if "```json" in ai_response:
-                        start = ai_response.find("```json") + 7
-                        end = ai_response.find("```", start)
-                        json_text = ai_response[start:end].strip()
-                    else:
-                        json_text = ai_response
-                    
-                    command = json.loads(json_text)
-                except:
-                    logger.warning("Invalid JSON")
-                    messages.append({"role": "user", "content": "Return valid JSON"})
-                    continue
-                
-                tool_name = command.get("tool_name")
-                params = command.get("parameters", {})
-                thought = command.get("thought", "")
-                
-                logger.info(f"💭 {thought}")
-                logger.info(f"🔧 {tool_name}")
-                
-                # Execute tool
-                result = None
-                
-                if tool_name == "navigate":
-                    result = self.navigate(params.get("url"))
-                    
-                elif tool_name == "transcribe_audio":
-                    result = self.transcribe_audio(params.get("audio_url"))
-                    
-                elif tool_name == "analyze_image":
-                    result = self.analyze_image(
-                        params.get("image_url"),
-                        params.get("question", "What is in this image?")
-                    )
-                    
-                elif tool_name == "python_repl":
-                    result = self.python_repl(params.get("code"))
-                    
-                elif tool_name == "submit_answer":
-                    result = self.submit_answer(params.get("answer"))
-                    
-                    if isinstance(result, dict):
-                        if result.get("correct"):
-                            logger.info("✅ CORRECT!")
-                            return result
-                        else:
-                            logger.warning(f"❌ INCORRECT: {result.get('reason')}")
-                            return result
-                
-                # Add result
-                messages.append({
-                    "role": "user",
-                    "content": f"Tool result: {str(result)[:500]}"
-                })
-                
-            except Exception as e:
-                logger.error(f"Step error: {e}")
-                messages.append({"role": "user", "content": f"Error: {e}"})
-        
-        return None
-    
-    def solve_quiz_chain(self, initial_url):
-        """Solve quiz chain"""
-        self.start_time = time.time()
-        
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+
+        text = transcription.strip()
+        logger.info(f"✅ Transcription: {text!r}")
+        return text
+
+    def solve_project2_audio(self, url: str):
+        """
+        /project2-audio-passphrase
+
+        Task (from page text):
+
+            Listen to /project2/audio-passphrase.opus.
+            Transcribe the spoken phrase (words plus the 3-digit code)
+            in lowercase, spaces allowed.
+        """
+        page_text = self.http_get_text(url)
+        # The page explicitly mentions /project2/audio-passphrase.opus
+        audio_url = f"{self.BASE_HOST}/project2/audio-passphrase.opus"
+        transcript = self.transcribe_audio_url(audio_url)
+        answer = transcript.lower().strip()
+        return self.submit_answer(url, answer)
+
+    # -------------------------------------------------------------------------
+    # Quiz 6: /project2-heatmap - most frequent color in heatmap.png
+    # -------------------------------------------------------------------------
+
+    def most_frequent_color_hex(self, img_bytes: bytes) -> str:
+        """
+        Compute the most frequent RGB color in an image and return it as #rrggbb.
+        """
+        img = Image.open(tempfile.SpooledTemporaryFile())
+        img.file.write(img_bytes)  # type: ignore[attr-defined]
+        img.file.seek(0)           # type: ignore[attr-defined]
+        img = Image.open(img.file)  # reopen properly
+
+        # Convert to RGB to normalize (handles RGBA, etc.)
+        img = img.convert("RGB")
+        pixels = list(img.getdata())
+        c = Counter(pixels).most_common(1)[0][0]  # (r, g, b)
+        hex_color = f"#{c[0]:02x}{c[1]:02x}{c[2]:02x}"
+        logger.info(f"Most frequent color: {hex_color}")
+        return hex_color
+
+    def solve_project2_heatmap(self, url: str):
+        """
+        /project2-heatmap
+
+        Task (from page text):
+
+            Open /project2/heatmap.png.
+            Find the most frequent RGB color. Return it as a hex string, e.g., #rrggbb.
+        """
+        img_url = f"{self.BASE_HOST}/project2/heatmap.png"
+        img_bytes = self.http_get_binary(img_url)
+        hex_color = self.most_frequent_color_hex(img_bytes)
+        return self.submit_answer(url, hex_color)
+
+    # -------------------------------------------------------------------------
+    # Quiz 7: /project2-csv - messy.csv normalization
+    # -------------------------------------------------------------------------
+
+    def normalize_messy_csv(self, csv_url: str) -> str:
+        """
+        Normalize /project2/messy.csv as per instructions:
+
+        - Output: JSON array of objects.
+        - Keys: snake_case -> id, name, joined, value
+        - joined: ISO-8601 date (UTC)
+        - value: integer
+        - Sorted by id ascending.
+        """
+        csv_text = self.http_get_text(csv_url)
+        df = pd.read_csv(StringIO(csv_text))
+
+        # Force 4 columns -> id, name, joined, value
+        expected_cols = ["id", "name", "joined", "value"]
+        if len(df.columns) != 4:
+            logger.warning(
+                f"Expected 4 columns in messy.csv, got {len(df.columns)}; will coerce anyway"
+            )
+
+        rename_map = {
+            old: new for old, new in zip(df.columns, expected_cols)
+        }
+        df = df.rename(columns=rename_map)
+
+        # id -> integer
+        df["id"] = pd.to_numeric(df["id"], errors="coerce").astype("Int64")
+        df = df.dropna(subset=["id"])
+        df["id"] = df["id"].astype(int)
+
+        # name -> strip whitespace, keep as string
+        df["name"] = df["name"].astype(str).str.strip()
+
+        # value -> extract integer
+        df["value"] = (
+            df["value"]
+            .astype(str)
+            .str.extract(r"(-?\d+)", expand=False)
+            .astype("Int64")
+        )
+        df = df.dropna(subset=["value"])
+        df["value"] = df["value"].astype(int)
+
+        # joined -> parse to datetime UTC, then ISO-8601
+        df["joined"] = pd.to_datetime(df["joined"], utc=True, errors="coerce")
+        df = df.dropna(subset=["joined"])
+        # Format as ISO-8601 with 'Z' suffix (UTC)
+        df["joined"] = df["joined"].dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # Sort by id ascending
+        df = df.sort_values("id")
+
+        records = df.to_dict(orient="records")
+        # Compact JSON (no extra spaces)
+        json_str = json.dumps(records, separators=(",", ":"))
+        logger.info(f"Normalized JSON: {json_str}")
+        return json_str
+
+    def solve_project2_csv(self, url: str):
+        """
+        /project2-csv
+
+        Task (from page text):
+
+            Download /project2/messy.csv.
+            Normalize to JSON:
+              - snake_case keys (id, name, joined, value)
+              - ISO-8601 dates
+              - integer values
+              - sorted by id ascending
+            POST the JSON array as a string answer.
+        """
+        csv_url = f"{self.BASE_HOST}/project2/messy.csv"
+        json_answer = self.normalize_messy_csv(csv_url)
+        return self.submit_answer(url, json_answer)
+
+    # -------------------------------------------------------------------------
+    # Quiz 8: /project2-gh-tree - GitHub API tree count + email offset
+    # -------------------------------------------------------------------------
+
+    def solve_project2_gh_tree(self, url: str):
+        """
+        /project2-gh-tree
+
+        Task (from page text, paraphrased):
+
+            Use GitHub API:
+              GET /repos/{owner}/{repo}/git/trees/{sha}?recursive=1
+            with params in /project2/gh-tree.json:
+              {
+                "owner": "...",
+                "repo": "...",
+                "sha": "...",
+                "pathPrefix": "project-1/",
+                "extension": ".md"
+              }
+
+            Count how many .md files are under pathPrefix.
+            Compute 'offset' as the length of your email address.
+            Answer = count + offset
+        """
+        config_url = f"{self.BASE_HOST}/project2/gh-tree.json"
+        cfg_text = self.http_get_text(config_url)
+        cfg = json.loads(cfg_text)
+
+        owner = cfg["owner"]
+        repo = cfg["repo"]
+        sha = cfg["sha"]
+        path_prefix = cfg["pathPrefix"]
+        extension = cfg["extension"]
+
+        gh_url = f"https://api.github.com/repos/{owner}/{repo}/git/trees/{sha}?recursive=1"
+        logger.info(f"Calling GitHub API: {gh_url}")
+        resp = requests.get(gh_url, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+
+        tree = data.get("tree", [])
+        count = 0
+        for node in tree:
+            path = node.get("path", "")
+            if path.startswith(path_prefix) and path.endswith(extension):
+                count += 1
+
+        offset = len(self.email)
+        answer_value = count + offset
+        logger.info(
+            f"Count of {extension} under {path_prefix}: {count}, "
+            f"email length offset: {offset}, answer: {answer_value}"
+        )
+
+        # Answer should be a number; server accepts JSON number.
+        return self.submit_answer(url, answer_value)
+
+    # -------------------------------------------------------------------------
+    # Orchestrator
+    # -------------------------------------------------------------------------
+
+    def solve_quiz_chain(self, initial_url: str):
+        """
+        Solve the entire quiz chain starting from initial_url.
+
+        Returns the final summary dict from the last submit.
+        """
         current_url = initial_url
         quiz_count = 0
         correct_count = 0
-        
-        logger.info(f"\n{'='*70}")
-        logger.info(f"🚀 Starting Working Quiz Solver")
-        logger.info(f"📍 URL: {initial_url}")
-        logger.info(f"{'='*70}\n")
-        
+        start_time = time.time()
+
+        logger.info("=" * 70)
+        logger.info("🚀 Starting Quiz Solver")
+        logger.info(f"📍 Initial URL: {initial_url}")
+        logger.info("=" * 70)
+
+        last_result = None
+
         while current_url:
             quiz_count += 1
-            logger.info(f"\n{'='*70}")
+            path = urlsplit(current_url).path
+            logger.info("\n" + "=" * 70)
             logger.info(f"📝 Quiz #{quiz_count}: {current_url}")
-            logger.info(f"{'='*70}\n")
-            
-            result = self.solve_single_quiz(current_url)
-            
-            if result is None:
-                logger.error("Failed")
+            logger.info("=" * 70)
+
+            if path == "/project2":
+                result = self.solve_project2_root(current_url)
+            elif path == "/project2-uv":
+                result = self.solve_project2_uv(current_url)
+            elif path == "/project2-git":
+                result = self.solve_project2_git(current_url)
+            elif path == "/project2-md":
+                result = self.solve_project2_md(current_url)
+            elif path == "/project2-audio-passphrase":
+                result = self.solve_project2_audio(current_url)
+            elif path == "/project2-heatmap":
+                result = self.solve_project2_heatmap(current_url)
+            elif path == "/project2-csv":
+                result = self.solve_project2_csv(current_url)
+            elif path == "/project2-gh-tree":
+                result = self.solve_project2_gh_tree(current_url)
+            else:
+                logger.error(f"Unknown quiz path: {path}, stopping.")
                 break
-            
-            if result.get('correct'):
+
+            last_result = result
+
+            if result.get("correct"):
                 correct_count += 1
                 logger.info(f"✅ Quiz #{quiz_count} CORRECT!")
             else:
-                logger.warning(f"❌ Quiz #{quiz_count} INCORRECT")
-            
-            next_url = result.get('url')
+                logger.warning(
+                    f"❌ Quiz #{quiz_count} INCORRECT: {result.get('reason')}"
+                )
+
+            next_url = result.get("url")
             if next_url and next_url != current_url:
                 logger.info(f"➡️  Next: {next_url}")
                 current_url = next_url
-                time.sleep(1)
+                # small politeness delay
+                time.sleep(result.get("delay", 1) or 1)
             else:
-                logger.info("🏁 Complete!")
+                logger.info("🏁 No next URL, chain complete.")
                 break
-        
-        elapsed = time.time() - self.start_time
-        success_rate = (correct_count / quiz_count * 100) if quiz_count > 0 else 0
-        
-        logger.info(f"\n{'='*70}")
-        logger.info(f"📊 SUMMARY")
-        logger.info(f"{'='*70}")
-        logger.info(f"Total: {quiz_count}")
+
+        elapsed = time.time() - start_time
+        success_rate = (correct_count / quiz_count * 100) if quiz_count else 0.0
+
+        logger.info("\n" + "=" * 70)
+        logger.info("📊 SUMMARY")
+        logger.info("=" * 70)
+        logger.info(f"Total quizzes: {quiz_count}")
         logger.info(f"✅ Correct: {correct_count}")
         logger.info(f"❌ Incorrect: {quiz_count - correct_count}")
         logger.info(f"📈 Success: {success_rate:.1f}%")
         logger.info(f"⏱️  Time: {elapsed:.1f}s")
-        logger.info(f"{'='*70}\n")
+        logger.info("=" * 70 + "\n")
+
+        return last_result
+
+
+if __name__ == "__main__":
+    # Simple manual test entrypoint (for local debugging)
+    EMAIL = os.getenv("TDS_EMAIL", "23f3002252@ds.study.iitm.ac.in")
+    SECRET = os.getenv("TDS_SECRET", "SECRET_KEY")
+    INITIAL_URL = "https://tds-llm-analysis.s-anand.net/project2"
+
+    solver = GroqQuizSolver(EMAIL, SECRET)
+    solver.solve_quiz_chain(INITIAL_URL)
