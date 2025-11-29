@@ -3,30 +3,24 @@ import json
 import time
 import logging
 import requests
+import subprocess
+import sys
 import base64
-import re
-import pandas as pd
-from io import StringIO
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+import tempfile
 from openai import OpenAI
 
 logger = logging.getLogger(__name__)
 
 class GroqQuizSolver:
     """
-    Enhanced quiz solver using Groq with multi-model fallback and tool-based approach
-    Based on GitHub autonomous agent pattern
+    Quiz solver based on proven working implementation
+    Uses Groq with proper audio/image support
     """
     
-    # Model fallback chain
     AVAILABLE_MODELS = [
-        "llama-3.3-70b-versatile",  # Best
-        "llama-3.1-70b-versatile",  # Backup
-        "llama-3.1-8b-instant",     # Fast fallback
+        "llama-3.3-70b-versatile",
+        "llama-3.1-70b-versatile", 
+        "llama-3.1-8b-instant",
     ]
     
     def __init__(self, email, secret):
@@ -34,7 +28,7 @@ class GroqQuizSolver:
         self.secret = secret
         self.api_key = os.getenv('GROQ_API_KEY')
         if not self.api_key:
-            raise ValueError("GROQ_API_KEY environment variable not set")
+            raise ValueError("GROQ_API_KEY not set")
         
         self.client = OpenAI(
             api_key=self.api_key,
@@ -43,252 +37,164 @@ class GroqQuizSolver:
         
         self.start_time = None
         self.current_url = None
-        self.conversation_history = []
         
-        # System prompt for the agent
         self.SYSTEM_PROMPT = """You are an Autonomous Quiz Solver.
+You reply with a JSON OBJECT.
 
 AVAILABLE TOOLS:
-1. "navigate": {"url": "string"} - Scrapes the page, returns text and links
-2. "download_file": {"url": "string"} - Downloads CSV/data files
-3. "transcribe_audio": {"audio_url": "string"} - Transcribes audio files using Groq Whisper
-4. "analyze_image": {"image_url": "string", "question": "string"} - Analyzes images (limited)
-5. "python_repl": {"code": "string"} - Executes Python code (pandas available as pd)
-6. "analyze_data": {"data": "string", "cutoff": "number"} - Analyzes CSV data with cutoff
-7. "submit_answer": {"answer": "any"} - Submits final answer
-
-IMPORTANT RULES:
-- The "answer" parameter should be ONLY the actual answer value (string, number, etc.)
-- DO NOT include email, secret, or url in the answer field - those are handled automatically
-- For demo quizzes with no specific question, submit a simple string like "hello" or "demo"
-- For CSV analysis: The rule is ALMOST ALWAYS sum of all numbers GREATER THAN (>) the cutoff, NOT >=
+1. "navigate": {"url": "string"} - Scrapes page, returns text and links
+2. "transcribe_audio": {"audio_url": "string"} - Transcribes audio with Groq Whisper
+3. "analyze_image": {"image_url": "string", "question": "string"} - Analyzes images with Groq Vision
+4. "python_repl": {"code": "string"} - Executes Python (pandas available)
+5. "submit_answer": {"answer": "any"} - Submits final answer
 
 STRATEGY:
-1. ALWAYS call "navigate" first to read the quiz page - NEVER skip this step
-2. Look for:
-   - Secret codes in text (submit the code as a string)
-   - CSV/data file links (download and analyze)
-   - Cutoff values for filtering (look for phrases like "cutoff: X")
-3. For data analysis with CSV:
-   - The page will show a link to CSV data
-   - Download the CSV file
-   - Look CAREFULLY at what the page asks for - it might be:
-     * Sum of numbers > cutoff
-     * Sum of numbers >= cutoff  
-     * Count of numbers > cutoff
-     * Or something else entirely
-   - When using python_repl, PRINT multiple possibilities to see which makes sense:
-     ```python
-     import pandas as pd
-     from io import StringIO
-     df = pd.read_csv(StringIO(csv_data), header=None)
-     print("Sum > cutoff:", df[df[0] > CUTOFF][0].sum())
-     print("Sum >= cutoff:", df[df[0] >= CUTOFF][0].sum())
-     print("Count > cutoff:", len(df[df[0] > CUTOFF]))
-     ```
-   - Then submit the one that matches what the quiz asks for
-4. Submit the answer using "submit_answer" with just the answer value
-5. NEVER submit generic answers like "hello" unless it's clearly a demo quiz
+1. ALWAYS navigate first to see the quiz
+2. For SECRET CODE: If text says "Secret code is X", submit X
+3. For CSV DATA: Download, filter > cutoff, sum column 0
+4. For AUDIO: Transcribe and extract answer
+5. For IMAGE: Analyze and extract code/number
+6. For DEMO: Submit simple string like "hello"
 
 RESPONSE FORMAT (STRICT JSON):
 {
-  "thought": "Your reasoning",
+  "thought": "reasoning",
   "tool_name": "tool_name",
   "parameters": {...}
-}
-
-EXAMPLES:
-- For demo: {"tool_name": "submit_answer", "parameters": {"answer": "hello"}}
-- For secret code: {"tool_name": "submit_answer", "parameters": {"answer": "SECRET123"}}
-- For data sum: {"tool_name": "submit_answer", "parameters": {"answer": 42}}
-"""
-    
-    def get_browser(self):
-        """Initialize headless Chrome"""
-        chrome_options = Options()
-        chrome_options.add_argument('--headless')
-        chrome_options.add_argument('--no-sandbox')
-        chrome_options.add_argument('--disable-dev-shm-usage')
-        chrome_options.add_argument('--disable-gpu')
-        driver = webdriver.Chrome(options=chrome_options)
-        return driver
+}"""
     
     def navigate(self, url):
-        """Tool: Navigate to URL and scrape content"""
-        logger.info(f"🌐 Navigating to: {url}")
-        driver = self.get_browser()
+        """Navigate and scrape page - simplified version"""
+        logger.info(f"🌐 Navigating: {url}")
         try:
-            driver.get(url)
-            time.sleep(3)
+            import requests
+            from bs4 import BeautifulSoup
             
-            body = driver.find_element(By.TAG_NAME, 'body')
-            text = body.text
-            
-            # Extract links
-            links = []
-            try:
-                link_elements = driver.find_elements(By.TAG_NAME, 'a')
-                links = [elem.get_attribute('href') for elem in link_elements if elem.get_attribute('href')]
-            except:
-                pass
-            
-            return {
-                "text": text[:2000],  # Truncate to save tokens
-                "links": links
-            }
-        finally:
-            driver.quit()
-    
-    def download_file(self, url):
-        """Tool: Download a file from URL"""
-        logger.info(f"⬇️  Downloading: {url}")
-        try:
             response = requests.get(url, timeout=30)
-            response.raise_for_status()
-            return response.text
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            text = soup.get_text()[:2000]
+            links = [{"href": a.get('href'), "text": a.get_text()} 
+                    for a in soup.find_all('a') if a.get('href')]
+            
+            # Look for audio
+            audio = None
+            audio_tag = soup.find('audio')
+            if audio_tag and audio_tag.get('src'):
+                audio = audio_tag.get('src')
+                if not audio.startswith('http'):
+                    from urllib.parse import urljoin
+                    audio = urljoin(url, audio)
+            
+            return json.dumps({
+                "text": text,
+                "links": links[:10],
+                "audio": audio
+            })
         except Exception as e:
-            logger.error(f"Download error: {e}")
+            logger.error(f"Navigate error: {e}")
             return f"Error: {e}"
     
     def transcribe_audio(self, audio_url):
-        """Tool: Download and transcribe audio file using Groq Whisper"""
-        logger.info(f"🎵 Transcribing audio: {audio_url}")
+        """Transcribe audio using Groq Whisper"""
+        logger.info(f"🎵 Transcribing: {audio_url}")
         try:
-            # Download audio file
+            # Download audio
             response = requests.get(audio_url, timeout=30)
             response.raise_for_status()
             
+            # Determine extension
+            if ".ogg" in audio_url:
+                ext = ".ogg"
+            elif ".wav" in audio_url:
+                ext = ".wav"
+            else:
+                ext = ".mp3"
+            
             # Save to temp file
-            import tempfile
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as tmp:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
                 tmp.write(response.content)
-                audio_path = tmp.name
+                filename = tmp.name
             
             try:
-                # Transcribe using Groq Whisper
-                with open(audio_path, 'rb') as audio_file:
+                # Transcribe with Groq
+                with open(filename, "rb") as file:
                     transcription = self.client.audio.transcriptions.create(
+                        file=(filename, file.read()),
                         model="whisper-large-v3",
-                        file=audio_file,
-                        response_format="text"
+                        response_format="json",
+                        language="en",
+                        temperature=0.0
                     )
-                logger.info(f"✅ Transcription: {transcription}")
-                return str(transcription)
+                logger.info(f"✅ Transcription: {transcription.text}")
+                return f"TRANSCRIPTION: {transcription.text}"
             finally:
-                # Clean up temp file
-                os.unlink(audio_path)
+                os.unlink(filename)
                 
         except Exception as e:
-            logger.error(f"Audio transcription error: {e}", exc_info=True)
+            logger.error(f"Transcription error: {e}")
             return f"Error: {e}"
     
-    def analyze_image(self, image_url, question="What do you see in this image?"):
-        """Tool: Analyze image - placeholder for vision API"""
-        logger.info(f"🖼️  Analyzing image: {image_url}")
-        logger.warning("⚠️  Image analysis not fully implemented")
-        return f"Image at {image_url} downloaded but vision analysis requires additional API"
-    
-    def python_repl(self, code):
-        """Tool: Download file from URL"""
-        logger.info(f"⬇️  Downloading: {url}")
+    def analyze_image(self, image_url, question="What do you see?"):
+        """Analyze image using Groq Vision"""
+        logger.info(f"🖼️  Analyzing: {image_url}")
         try:
-            response = requests.get(url, timeout=30)
+            # Download and encode image
+            response = requests.get(image_url, timeout=30)
             response.raise_for_status()
-            return response.text
+            b64_image = base64.b64encode(response.content).decode('utf-8')
+            
+            # Use Groq vision model
+            completion = self.client.chat.completions.create(
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": question},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/jpeg;base64,{b64_image}"
+                            }
+                        }
+                    ]
+                }],
+                model="llama-3.2-11b-vision-preview",
+                temperature=0.1
+            )
+            
+            result = completion.choices[0].message.content
+            logger.info(f"✅ Vision: {result}")
+            return f"IMAGE ANALYSIS: {result}"
+            
         except Exception as e:
-            logger.error(f"Download error: {e}")
+            logger.error(f"Vision error: {e}")
             return f"Error: {e}"
     
     def python_repl(self, code):
-        """Tool: Execute Python code for data analysis"""
-        logger.info(f"🐍 Executing Python code")
+        """Execute Python code"""
+        logger.info(f"🐍 Executing Python")
         try:
-            # Create a safe execution environment
-            local_vars = {
-                'pd': pd,
-                'requests': requests,
-                'StringIO': StringIO
-            }
+            prepend = "import pandas as pd\nimport numpy as np\nimport requests\nimport json\n"
+            full_code = prepend + code
             
-            # Capture print output
-            from io import StringIO as SIO
-            import sys
-            old_stdout = sys.stdout
-            sys.stdout = captured_output = SIO()
+            result = subprocess.run(
+                [sys.executable, "-c", full_code],
+                capture_output=True,
+                text=True,
+                timeout=45
+            )
             
-            # Execute code
-            exec(code, {"__builtins__": __builtins__}, local_vars)
-            
-            # Get output
-            sys.stdout = old_stdout
-            output = captured_output.getvalue()
-            
-            logger.info(f"Code output: {output}")
-            return output.strip()
-            
-        except Exception as e:
-            logger.error(f"Python execution error: {e}", exc_info=True)
-            return f"Error: {e}"
-    
-    def analyze_data(self, data, cutoff=None):
-        """Tool: Analyze CSV data with optional cutoff - tries multiple interpretations"""
-        logger.info(f"📊 Analyzing data (cutoff: {cutoff})")
-        try:
-            # Convert cutoff to int if it's a string
-            if isinstance(cutoff, str):
-                cutoff = int(cutoff)
-            
-            # Parse CSV
-            df = pd.read_csv(StringIO(data), header=None)
-            logger.info(f"Data shape: {df.shape}, Columns: {list(df.columns)}")
-            logger.info(f"First few rows:\n{df.head()}")
-            
-            if cutoff is not None:
-                # Try multiple interpretations
-                results = {}
-                
-                # 1. Sum of values > cutoff in column 0
-                results['sum_gt_col0'] = df[df[0] > cutoff][0].sum()
-                
-                # 2. Sum of values >= cutoff in column 0
-                results['sum_gte_col0'] = df[df[0] >= cutoff][0].sum()
-                
-                # 3. Sum of values < cutoff in column 0
-                results['sum_lt_col0'] = df[df[0] < cutoff][0].sum()
-                
-                # 4. Sum of values <= cutoff in column 0
-                results['sum_lte_col0'] = df[df[0] <= cutoff][0].sum()
-                
-                # 5. Count of values > cutoff
-                results['count_gt'] = len(df[df[0] > cutoff])
-                
-                # 6. Count of values >= cutoff
-                results['count_gte'] = len(df[df[0] >= cutoff])
-                
-                # 7. Total sum of all values
-                results['sum_all'] = df[0].sum()
-                
-                # 8. Total count
-                results['count_all'] = len(df)
-                
-                logger.info(f"All calculations:")
-                for key, val in results.items():
-                    logger.info(f"  {key}: {val}")
-                
-                # Return the most common one (> cutoff)
-                return str(int(results['sum_gt_col0']))
+            if result.returncode == 0:
+                return f"STDOUT:\n{result.stdout}"
             else:
-                # Just return sum of column 0
-                result = df[0].sum()
-                return str(int(result))
+                return f"STDERR:\n{result.stderr}"
                 
         except Exception as e:
-            logger.error(f"Analysis error: {e}", exc_info=True)
             return f"Error: {e}"
     
     def submit_answer(self, answer):
-        """Tool: Submit answer to quiz"""
-        logger.info(f"📤 Submitting answer: {answer}")
+        """Submit answer to quiz"""
+        logger.info(f"📤 Submitting: {answer}")
         
         payload = {
             "email": self.email,
@@ -301,11 +207,10 @@ EXAMPLES:
             response = requests.post(
                 "https://tds-llm-analysis.s-anand.net/submit",
                 json=payload,
-                headers={'Content-Type': 'application/json'},
-                timeout=30
+                timeout=15
             )
             
-            logger.info(f"📡 Response: {response.status_code}")
+            logger.info(f"📡 {response.status_code}")
             result = response.json()
             logger.info(f"📨 {result}")
             return result
@@ -314,11 +219,11 @@ EXAMPLES:
             logger.error(f"Submit error: {e}")
             return {"error": str(e)}
     
-    def query_llm_robust(self, messages):
-        """Call LLM with model fallback"""
+    def query_llm(self, messages):
+        """Query LLM with fallback"""
         for model in self.AVAILABLE_MODELS:
             try:
-                logger.info(f"🤖 Using model: {model}")
+                logger.info(f"🤖 Model: {model}")
                 response = self.client.chat.completions.create(
                     model=model,
                     messages=messages,
@@ -327,62 +232,53 @@ EXAMPLES:
                 )
                 return response.choices[0].message.content
             except Exception as e:
-                error_msg = str(e)
-                if "429" in error_msg or "rate" in error_msg.lower():
-                    logger.warning(f"⚠️  {model} rate limited, trying next...")
+                if "429" in str(e) or "rate" in str(e).lower():
+                    logger.warning(f"⚠️  {model} rate limited")
                     continue
                 else:
-                    raise e
-        
-        raise Exception("All models failed or rate limited")
+                    raise
+        raise Exception("All models failed")
     
     def solve_single_quiz(self, url):
-        """Solve a single quiz using agent loop"""
+        """Solve one quiz"""
         self.current_url = url
         
         messages = [
             {"role": "system", "content": self.SYSTEM_PROMPT},
-            {"role": "user", "content": f"Solve this quiz: {url}\nEmail: {self.email}"}
+            {"role": "user", "content": f"Solve: {url}\nEmail: {self.email}"}
         ]
         
-        max_steps = 10
-        for step in range(max_steps):
+        for step in range(10):
             logger.info(f"\n{'='*50}")
-            logger.info(f"Step {step + 1}/{max_steps}")
+            logger.info(f"Step {step+1}/10")
             logger.info(f"{'='*50}")
             
             try:
                 # Get AI decision
-                ai_response = self.query_llm_robust(messages)
+                ai_response = self.query_llm(messages)
                 messages.append({"role": "assistant", "content": ai_response})
                 
-                # Parse decision
+                # Parse JSON
                 try:
-                    # Try to extract JSON
                     if "```json" in ai_response:
                         start = ai_response.find("```json") + 7
-                        end = ai_response.find("```", start)
-                        json_text = ai_response[start:end].strip()
-                    elif "```" in ai_response:
-                        start = ai_response.find("```") + 3
                         end = ai_response.find("```", start)
                         json_text = ai_response[start:end].strip()
                     else:
                         json_text = ai_response
                     
                     command = json.loads(json_text)
-                except json.JSONDecodeError:
-                    logger.warning("⚠️  Invalid JSON from AI")
-                    messages.append({"role": "user", "content": "Error: Return valid JSON only"})
+                except:
+                    logger.warning("Invalid JSON")
+                    messages.append({"role": "user", "content": "Return valid JSON"})
                     continue
                 
                 tool_name = command.get("tool_name")
                 params = command.get("parameters", {})
                 thought = command.get("thought", "")
                 
-                logger.info(f"💭 Thought: {thought}")
-                logger.info(f"🔧 Tool: {tool_name}")
-                logger.info(f"📝 Params: {params}")
+                logger.info(f"💭 {thought}")
+                logger.info(f"🔧 {tool_name}")
                 
                 # Execute tool
                 result = None
@@ -390,57 +286,43 @@ EXAMPLES:
                 if tool_name == "navigate":
                     result = self.navigate(params.get("url"))
                     
-                elif tool_name == "download_file":
-                    result = self.download_file(params.get("url"))
-                    
                 elif tool_name == "transcribe_audio":
                     result = self.transcribe_audio(params.get("audio_url"))
                     
                 elif tool_name == "analyze_image":
                     result = self.analyze_image(
                         params.get("image_url"),
-                        params.get("question", "What do you see?")
+                        params.get("question", "What is in this image?")
                     )
                     
                 elif tool_name == "python_repl":
                     result = self.python_repl(params.get("code"))
                     
-                elif tool_name == "analyze_data":
-                    result = self.analyze_data(
-                        params.get("data"),
-                        params.get("cutoff")
-                    )
-                    
                 elif tool_name == "submit_answer":
                     result = self.submit_answer(params.get("answer"))
                     
-                    # Check if done
                     if isinstance(result, dict):
                         if result.get("correct"):
-                            logger.info("✅ Answer CORRECT!")
+                            logger.info("✅ CORRECT!")
                             return result
                         else:
-                            logger.warning(f"❌ Answer INCORRECT: {result.get('reason')}")
+                            logger.warning(f"❌ INCORRECT: {result.get('reason')}")
                             return result
                 
-                else:
-                    result = {"error": f"Unknown tool: {tool_name}"}
-                
-                # Add result to conversation
+                # Add result
                 messages.append({
                     "role": "user",
-                    "content": f"Tool result: {json.dumps(result) if isinstance(result, dict) else str(result)[:500]}"
+                    "content": f"Tool result: {str(result)[:500]}"
                 })
                 
             except Exception as e:
-                logger.error(f"❌ Step error: {e}", exc_info=True)
-                messages.append({"role": "user", "content": f"Error: {str(e)}"})
+                logger.error(f"Step error: {e}")
+                messages.append({"role": "user", "content": f"Error: {e}"})
         
-        logger.error("Max steps reached without solution")
         return None
     
     def solve_quiz_chain(self, initial_url):
-        """Solve chain of quizzes"""
+        """Solve quiz chain"""
         self.start_time = time.time()
         
         current_url = initial_url
@@ -448,9 +330,8 @@ EXAMPLES:
         correct_count = 0
         
         logger.info(f"\n{'='*70}")
-        logger.info(f"🚀 Starting Enhanced Quiz Solver")
-        logger.info(f"📍 Initial URL: {initial_url}")
-        logger.info(f"⚡ Using Groq with model fallback")
+        logger.info(f"🚀 Starting Working Quiz Solver")
+        logger.info(f"📍 URL: {initial_url}")
         logger.info(f"{'='*70}\n")
         
         while current_url:
@@ -462,26 +343,24 @@ EXAMPLES:
             result = self.solve_single_quiz(current_url)
             
             if result is None:
-                logger.error("❌ Failed to solve quiz")
+                logger.error("Failed")
                 break
             
             if result.get('correct'):
                 correct_count += 1
                 logger.info(f"✅ Quiz #{quiz_count} CORRECT!")
             else:
-                logger.warning(f"❌ Quiz #{quiz_count} INCORRECT: {result.get('reason')}")
+                logger.warning(f"❌ Quiz #{quiz_count} INCORRECT")
             
-            # Get next URL
             next_url = result.get('url')
             if next_url and next_url != current_url:
                 logger.info(f"➡️  Next: {next_url}")
                 current_url = next_url
                 time.sleep(1)
             else:
-                logger.info("🏁 Chain complete!")
+                logger.info("🏁 Complete!")
                 break
         
-        # Summary
         elapsed = time.time() - self.start_time
         success_rate = (correct_count / quiz_count * 100) if quiz_count > 0 else 0
         
@@ -493,5 +372,4 @@ EXAMPLES:
         logger.info(f"❌ Incorrect: {quiz_count - correct_count}")
         logger.info(f"📈 Success: {success_rate:.1f}%")
         logger.info(f"⏱️  Time: {elapsed:.1f}s")
-        logger.info(f"🤖 Model: Groq (multi-model fallback)")
         logger.info(f"{'='*70}\n")
