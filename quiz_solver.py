@@ -69,44 +69,53 @@ RESPONSE FORMAT (STRICT JSON):
 }"""
     
     def navigate(self, url):
-        """Navigate and scrape page"""
+        """Navigate and scrape page using Selenium to handle JavaScript"""
         logger.info(f"🌐 Navigating: {url}")
         try:
-            import requests
-            from bs4 import BeautifulSoup
+            from selenium import webdriver
+            from selenium.webdriver.chrome.options import Options
+            from selenium.webdriver.common.by import By
             
-            response = requests.get(url, timeout=30)
-            soup = BeautifulSoup(response.text, 'html.parser')
+            chrome_options = Options()
+            chrome_options.add_argument('--headless')
+            chrome_options.add_argument('--no-sandbox')
+            chrome_options.add_argument('--disable-dev-shm-usage')
+            chrome_options.add_argument('--disable-gpu')
             
-            text = soup.get_text()[:2000]
+            driver = webdriver.Chrome(options=chrome_options)
+            driver.get(url)
             
-            # Extract all links
+            # Wait for JavaScript to render
+            import time
+            time.sleep(3)
+            
+            # Get all text
+            text = driver.find_element(By.TAG_NAME, 'body').text
+            
+            # Get all links
             links = []
-            for a in soup.find_all('a'):
-                href = a.get('href')
+            for elem in driver.find_elements(By.TAG_NAME, 'a'):
+                href = elem.get_attribute('href')
                 if href:
-                    # Make absolute URLs
-                    if not href.startswith('http'):
-                        from urllib.parse import urljoin
-                        href = urljoin(url, href)
-                    links.append({"href": href, "text": a.get_text()})
+                    links.append({"href": href, "text": elem.text})
             
             # Look for audio
             audio = None
-            audio_tag = soup.find('audio')
-            if audio_tag and audio_tag.get('src'):
-                audio = audio_tag.get('src')
-                if not audio.startswith('http'):
-                    from urllib.parse import urljoin
-                    audio = urljoin(url, audio)
+            try:
+                audio_elem = driver.find_element(By.TAG_NAME, 'audio')
+                audio = audio_elem.get_attribute('src')
+            except:
+                pass
+            
+            driver.quit()
             
             # Log what we found
             logger.info(f"Found {len(links)} links, audio: {bool(audio)}")
-            logger.info(f"Text preview: {text[:200]}")
+            logger.info(f"Text preview: {text[:300]}")
             
             return json.dumps({
                 "text": text,
-                "links": links[:15],  # Return more links
+                "links": links[:15],
                 "audio": audio
             })
         except Exception as e:
