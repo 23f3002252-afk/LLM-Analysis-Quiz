@@ -50,11 +50,16 @@ AVAILABLE TOOLS:
 
 STRATEGY:
 1. ALWAYS navigate first to see the quiz
-2. For SECRET CODE: If text says "Secret code is X", submit X
-3. For CSV DATA: Download, filter > cutoff, sum column 0
-4. For AUDIO: Transcribe and extract answer
+2. For SECRET CODE: Navigate to data URL and extract the secret
+3. For CSV DATA: 
+   - Audio might say ">=" but QUIZ MIGHT WANT ">"
+   - Download CSV, extract cutoff from page
+   - Try: Sum of column 0 where value > cutoff (NOT >=)
+   - Look at page text carefully for exact requirements
+4. For AUDIO: Transcribe and follow instructions CAREFULLY
 5. For IMAGE: Analyze and extract code/number
 6. For DEMO: Submit simple string like "hello"
+7. IMPORTANT: If audio/text says ">=", the quiz might still want ">"!
 
 RESPONSE FORMAT (STRICT JSON):
 {
@@ -64,7 +69,7 @@ RESPONSE FORMAT (STRICT JSON):
 }"""
     
     def navigate(self, url):
-        """Navigate and scrape page - simplified version"""
+        """Navigate and scrape page"""
         logger.info(f"🌐 Navigating: {url}")
         try:
             import requests
@@ -74,8 +79,17 @@ RESPONSE FORMAT (STRICT JSON):
             soup = BeautifulSoup(response.text, 'html.parser')
             
             text = soup.get_text()[:2000]
-            links = [{"href": a.get('href'), "text": a.get_text()} 
-                    for a in soup.find_all('a') if a.get('href')]
+            
+            # Extract all links
+            links = []
+            for a in soup.find_all('a'):
+                href = a.get('href')
+                if href:
+                    # Make absolute URLs
+                    if not href.startswith('http'):
+                        from urllib.parse import urljoin
+                        href = urljoin(url, href)
+                    links.append({"href": href, "text": a.get_text()})
             
             # Look for audio
             audio = None
@@ -86,13 +100,17 @@ RESPONSE FORMAT (STRICT JSON):
                     from urllib.parse import urljoin
                     audio = urljoin(url, audio)
             
+            # Log what we found
+            logger.info(f"Found {len(links)} links, audio: {bool(audio)}")
+            logger.info(f"Text preview: {text[:200]}")
+            
             return json.dumps({
                 "text": text,
-                "links": links[:10],
+                "links": links[:15],  # Return more links
                 "audio": audio
             })
         except Exception as e:
-            logger.error(f"Navigate error: {e}")
+            logger.error(f"Navigate error: {e}", exc_info=True)
             return f"Error: {e}"
     
     def transcribe_audio(self, audio_url):
