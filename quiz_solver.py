@@ -151,9 +151,10 @@ Please analyze this quiz and provide a structured solution in JSON format:
 }}
 
 IMPORTANT: 
-- If you need to download and analyze external data, set "answer" to null and "needs_external_data" to true
-- If you can answer immediately from the visible text, provide the actual answer and set "needs_external_data" to false
-- Do NOT say "Cannot be calculated" - just use null for the answer field"""
+- If you CAN answer from the visible text alone, provide the actual answer and set "needs_external_data" to false
+- If you MUST download external files/URLs to answer, set "answer" to null and "needs_external_data" to true
+- For simple demo quizzes with no specific question, you can provide an empty object {{}} as the answer
+- Do NOT say "Cannot be calculated" - use null only when external data is truly required"""
 
         try:
             messages = [
@@ -372,7 +373,6 @@ Return JSON:
             answer = solution.get('answer')
             
             # Process external data if needed
-            # Check if answer is None, "Cannot...", or needs_external_data is true
             if solution.get('needs_external_data') and (answer is None or (isinstance(answer, str) and "cannot" in answer.lower())):
                 data_source = solution.get('data_source')
                 file_type = solution.get('file_type')
@@ -384,6 +384,11 @@ Return JSON:
                     if result:
                         answer = result.get('answer')
                         logger.info(f"✅ External data processed, answer: {answer}")
+            
+            # If answer is still null and doesn't need external data, use a default
+            if answer is None and not solution.get('needs_external_data'):
+                logger.warning("⚠️  Answer is null but no external data needed - using empty object")
+                answer = {}  # Default empty answer for demo quizzes
             
             if answer is None:
                 logger.error("❌ No answer determined")
