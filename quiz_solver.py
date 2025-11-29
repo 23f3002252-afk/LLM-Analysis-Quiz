@@ -67,16 +67,24 @@ STRATEGY:
    - Secret codes in text (submit the code as a string)
    - CSV/data file links (download and analyze)
    - Cutoff values for filtering (look for phrases like "cutoff: X")
-3. For data analysis:
-   - Option A: Download CSV then use "python_repl" to analyze:
+3. For data analysis with CSV:
+   - The page will show a link to CSV data
+   - Download the CSV file
+   - Look CAREFULLY at what the page asks for - it might be:
+     * Sum of numbers > cutoff
+     * Sum of numbers >= cutoff  
+     * Count of numbers > cutoff
+     * Or something else entirely
+   - When using python_repl, PRINT multiple possibilities to see which makes sense:
      ```python
      import pandas as pd
      from io import StringIO
-     df = pd.read_csv(StringIO(data), header=None)
-     filtered = df[df[0] > CUTOFF]
-     print(filtered[0].sum())
+     df = pd.read_csv(StringIO(csv_data), header=None)
+     print("Sum > cutoff:", df[df[0] > CUTOFF][0].sum())
+     print("Sum >= cutoff:", df[df[0] >= CUTOFF][0].sum())
+     print("Count > cutoff:", len(df[df[0] > CUTOFF]))
      ```
-   - Option B: Use "analyze_data" tool directly
+   - Then submit the one that matches what the quiz asks for
 4. Submit the answer using "submit_answer" with just the answer value
 5. NEVER submit generic answers like "hello" unless it's clearly a demo quiz
 
@@ -172,7 +180,7 @@ EXAMPLES:
             return f"Error: {e}"
     
     def analyze_data(self, data, cutoff=None):
-        """Tool: Analyze CSV data with optional cutoff"""
+        """Tool: Analyze CSV data with optional cutoff - tries multiple interpretations"""
         logger.info(f"📊 Analyzing data (cutoff: {cutoff})")
         try:
             # Convert cutoff to int if it's a string
@@ -181,14 +189,43 @@ EXAMPLES:
             
             # Parse CSV
             df = pd.read_csv(StringIO(data), header=None)
-            logger.info(f"Data shape: {df.shape}")
+            logger.info(f"Data shape: {df.shape}, Columns: {list(df.columns)}")
+            logger.info(f"First few rows:\n{df.head()}")
             
             if cutoff is not None:
-                # Use > (GREATER THAN, not >=)
-                filtered = df[df[0] > cutoff]
-                result = filtered[0].sum()
-                logger.info(f"Sum of values > {cutoff}: {result}")
-                return str(int(result))
+                # Try multiple interpretations
+                results = {}
+                
+                # 1. Sum of values > cutoff in column 0
+                results['sum_gt_col0'] = df[df[0] > cutoff][0].sum()
+                
+                # 2. Sum of values >= cutoff in column 0
+                results['sum_gte_col0'] = df[df[0] >= cutoff][0].sum()
+                
+                # 3. Sum of values < cutoff in column 0
+                results['sum_lt_col0'] = df[df[0] < cutoff][0].sum()
+                
+                # 4. Sum of values <= cutoff in column 0
+                results['sum_lte_col0'] = df[df[0] <= cutoff][0].sum()
+                
+                # 5. Count of values > cutoff
+                results['count_gt'] = len(df[df[0] > cutoff])
+                
+                # 6. Count of values >= cutoff
+                results['count_gte'] = len(df[df[0] >= cutoff])
+                
+                # 7. Total sum of all values
+                results['sum_all'] = df[0].sum()
+                
+                # 8. Total count
+                results['count_all'] = len(df)
+                
+                logger.info(f"All calculations:")
+                for key, val in results.items():
+                    logger.info(f"  {key}: {val}")
+                
+                # Return the most common one (> cutoff)
+                return str(int(results['sum_gt_col0']))
             else:
                 # Just return sum of column 0
                 result = df[0].sum()
