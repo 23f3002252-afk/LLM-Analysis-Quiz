@@ -144,14 +144,16 @@ Please analyze this quiz and provide a structured solution in JSON format:
     "analysis_needed": "What calculation/analysis is required?",
     "answer_format": "Expected format of answer (number/string/boolean/object/base64)",
     "submit_url": "Where to POST the answer",
-    "answer": "Your calculated answer (provide if you can compute it now)",
+    "answer": null,
     "needs_external_data": true/false,
     "confidence": "high/medium/low",
     "reasoning": "Brief explanation of your approach"
 }}
 
-If you need to download and analyze external data, indicate that in needs_external_data.
-If you can answer immediately from the visible text, provide the answer directly."""
+IMPORTANT: 
+- If you need to download and analyze external data, set "answer" to null and "needs_external_data" to true
+- If you can answer immediately from the visible text, provide the actual answer and set "needs_external_data" to false
+- Do NOT say "Cannot be calculated" - just use null for the answer field"""
 
         try:
             messages = [
@@ -370,15 +372,18 @@ Return JSON:
             answer = solution.get('answer')
             
             # Process external data if needed
-            if solution.get('needs_external_data') and answer is None:
+            # Check if answer is None, "Cannot...", or needs_external_data is true
+            if solution.get('needs_external_data') and (answer is None or (isinstance(answer, str) and "cannot" in answer.lower())):
                 data_source = solution.get('data_source')
                 file_type = solution.get('file_type')
                 analysis_needed = solution.get('analysis_needed')
                 
                 if data_source:
+                    logger.info(f"📊 Processing external data from: {data_source}")
                     result = self.process_external_data(data_source, file_type, analysis_needed)
                     if result:
                         answer = result.get('answer')
+                        logger.info(f"✅ External data processed, answer: {answer}")
             
             if answer is None:
                 logger.error("❌ No answer determined")
