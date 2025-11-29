@@ -5,6 +5,8 @@ import logging
 import requests
 import base64
 import re
+import pandas as pd
+from io import StringIO
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -16,8 +18,16 @@ logger = logging.getLogger(__name__)
 
 class GroqQuizSolver:
     """
-    Quiz solver using Groq via OpenAI-compatible API (more stable!)
+    Enhanced quiz solver using Groq with multi-model fallback and tool-based approach
+    Based on GitHub autonomous agent pattern
     """
+    
+    # Model fallback chain
+    AVAILABLE_MODELS = [
+        "llama-3.3-70b-versatile",  # Best
+        "llama-3.1-70b-versatile",  # Backup
+        "llama-3.1-8b-instant",     # Fast fallback
+    ]
     
     def __init__(self, email, secret):
         self.email = email
@@ -26,51 +36,61 @@ class GroqQuizSolver:
         if not self.api_key:
             raise ValueError("GROQ_API_KEY environment variable not set")
         
-        # Use OpenAI client with Groq endpoint - much more stable!
         self.client = OpenAI(
             api_key=self.api_key,
             base_url="https://api.groq.com/openai/v1"
         )
-        self.model = "llama-3.3-70b-versatile"
         
         self.start_time = None
         self.current_url = None
         self.conversation_history = []
         
+        # System prompt for the agent
+        self.SYSTEM_PROMPT = """You are an Autonomous Quiz Solver.
+
+AVAILABLE TOOLS:
+1. "navigate": {"url": "string"} - Scrapes the page, returns text and links
+2. "download_file": {"url": "string"} - Downloads CSV/data files
+3. "analyze_data": {"data": "string", "cutoff": "number"} - Analyzes CSV data with cutoff
+4. "submit_answer": {"answer": "any"} - Submits final answer
+
+STRATEGY:
+1. Call "navigate" to read the quiz page
+2. Look for:
+   - Secret codes in text (submit directly)
+   - CSV/data file links (download and analyze)
+   - Cutoff values for filtering
+   - Submit URL (usually https://tds-llm-analysis.s-anand.net/submit)
+3. For data analysis: Sum of all numbers > cutoff (usually column 0)
+4. Submit the answer
+
+RESPONSE FORMAT (STRICT JSON):
+{
+  "thought": "Your reasoning",
+  "tool_name": "tool_name",
+  "parameters": {...}
+}"""
+    
     def get_browser(self):
-        """Initialize headless Chrome browser"""
+        """Initialize headless Chrome"""
         chrome_options = Options()
         chrome_options.add_argument('--headless')
         chrome_options.add_argument('--no-sandbox')
         chrome_options.add_argument('--disable-dev-shm-usage')
         chrome_options.add_argument('--disable-gpu')
-        chrome_options.add_argument('--window-size=1920,1080')
-        chrome_options.add_argument('--disable-blink-features=AutomationControlled')
-        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        chrome_options.add_experimental_option('useAutomationExtension', False)
-        
         driver = webdriver.Chrome(options=chrome_options)
         return driver
     
-    def fetch_quiz_page(self, url):
-        """Fetch and render quiz page with JavaScript execution"""
-        logger.info(f"🌐 Fetching quiz page: {url}")
-        
+    def navigate(self, url):
+        """Tool: Navigate to URL and scrape content"""
+        logger.info(f"🌐 Navigating to: {url}")
         driver = self.get_browser()
         try:
             driver.get(url)
             time.sleep(3)
             
-            try:
-                WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.TAG_NAME, "body"))
-                )
-            except:
-                pass
-            
-            html_content = driver.page_source
             body = driver.find_element(By.TAG_NAME, 'body')
-            visible_text = body.text
+            text = body.text
             
             # Extract links
             links = []
@@ -80,231 +100,49 @@ class GroqQuizSolver:
             except:
                 pass
             
-            logger.info(f"✅ Page fetched: {len(html_content)} bytes, {len(links)} links")
-            
             return {
-                'html': html_content,
-                'text': visible_text,
-                'url': url,
-                'links': links
+                "text": text[:2000],  # Truncate to save tokens
+                "links": links
             }
-        except Exception as e:
-            logger.error(f"❌ Error fetching page: {e}", exc_info=True)
-            return None
         finally:
             driver.quit()
     
     def download_file(self, url):
-        """Download a file from URL with retry logic"""
-        logger.info(f"⬇️  Downloading file from: {url}")
-        
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                response = requests.get(url, timeout=30)
-                response.raise_for_status()
-                logger.info(f"✅ File downloaded: {len(response.content)} bytes")
-                return response.content
-            except Exception as e:
-                logger.warning(f"⚠️  Download attempt {attempt + 1}/{max_retries} failed: {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(2)
-                else:
-                    logger.error(f"❌ Failed to download file")
-                    return None
-    
-    def solve_with_groq(self, quiz_content):
-        """Use Groq (via OpenAI client) to understand and solve the quiz"""
-        logger.info("🤖 Analyzing quiz with Groq (Llama 3.3 70B)")
-        
-        system_prompt = """You are an expert data analyst and problem solver. Your task is to:
-1. Understand the quiz question completely
-2. Identify what data needs to be accessed or downloaded
-3. Determine the analysis required
-4. Provide the correct answer in the exact format requested
-5. Identify the submission endpoint
-
-Be precise and methodical. Return your analysis as a JSON object."""
-
-        user_prompt = f"""Quiz Page Analysis:
-
-URL: {quiz_content['url']}
-
-VISIBLE TEXT:
-{quiz_content['text']}
-
-LINKS FOUND:
-{json.dumps(quiz_content.get('links', []), indent=2)}
-
-Analyze this carefully. Look for:
-1. What question is being asked
-2. What data or calculations are needed
-3. What format the answer should be in (look for examples in the text)
-4. Where to submit
-
-Please analyze this quiz and provide a structured solution in JSON format:
-{{
-    "understanding": "What is the question asking?",
-    "data_source": "URL or source of data (if applicable)",
-    "file_type": "Type of file to download (pdf/csv/json/excel/etc) or null",
-    "analysis_needed": "What calculation/analysis is required?",
-    "answer_format": "Expected format of answer (number/string/boolean/object/base64)",
-    "submit_url": "Where to POST the answer",
-    "answer": null,
-    "needs_external_data": true/false,
-    "confidence": "high/medium/low",
-    "reasoning": "Brief explanation of your approach"
-}}
-
-IMPORTANT: 
-- ALWAYS provide an actual answer value, even for demo quizzes
-- If the quiz shows example answer format, follow that exact format
-- If you CAN answer from the visible text alone, provide the actual answer (string, number, object, etc.) and set "needs_external_data" to false
-- If you MUST download external files/URLs to answer, set "answer" to null and "needs_external_data" to true
-- Do NOT provide empty objects {{}} unless that's specifically what the quiz asks for
-- Look carefully at the visible text for clues about what answer is expected"""
-
+        """Tool: Download file from URL"""
+        logger.info(f"⬇️  Downloading: {url}")
         try:
-            messages = [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ]
-            
-            # Add conversation history if exists
-            if self.conversation_history:
-                messages = [{"role": "system", "content": system_prompt}] + self.conversation_history + [{"role": "user", "content": user_prompt}]
-            
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=0.1,
-                max_tokens=4096
-            )
-            
-            response_text = response.choices[0].message.content
-            logger.info(f"💡 Groq response: {response_text[:500]}...")
-            
-            # Parse JSON response
-            solution = self.extract_json(response_text)
-            
-            if solution:
-                # Add to conversation history
-                self.conversation_history.append({"role": "user", "content": user_prompt})
-                self.conversation_history.append({"role": "assistant", "content": response_text})
-            
-            return solution
-            
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+            return response.text
         except Exception as e:
-            logger.error(f"❌ Error getting Groq analysis: {e}", exc_info=True)
-            return None
+            logger.error(f"Download error: {e}")
+            return f"Error: {e}"
     
-    def extract_json(self, text):
-        """Extract JSON from response with multiple strategies"""
+    def analyze_data(self, data, cutoff=None):
+        """Tool: Analyze CSV data with optional cutoff"""
+        logger.info(f"📊 Analyzing data (cutoff: {cutoff})")
         try:
-            # Strategy 1: Find JSON in code blocks
-            if "```json" in text:
-                start = text.find("```json") + 7
-                end = text.find("```", start)
-                json_text = text[start:end].strip()
-            elif "```" in text:
-                start = text.find("```") + 3
-                end = text.find("```", start)
-                json_text = text[start:end].strip()
+            # Parse CSV
+            df = pd.read_csv(StringIO(data), header=None)
+            
+            if cutoff is not None:
+                # Filter: numbers > cutoff in column 0
+                filtered = df[df[0] > cutoff]
+                result = filtered[0].sum()
+                logger.info(f"Sum of values > {cutoff}: {result}")
+                return str(int(result))
             else:
-                # Strategy 2: Find JSON-like structure
-                match = re.search(r'\{[\s\S]*\}', text)
-                if match:
-                    json_text = match.group(0)
-                else:
-                    json_text = text.strip()
-            
-            return json.loads(json_text)
-            
-        except json.JSONDecodeError:
-            # Strategy 3: Try to fix common issues
-            try:
-                json_text = re.sub(r',\s*}', '}', json_text)
-                json_text = re.sub(r',\s*]', ']', json_text)
-                return json.loads(json_text)
-            except:
-                logger.error("❌ Could not parse JSON")
-                return None
+                # Just return sum of column 0
+                result = df[0].sum()
+                return str(int(result))
+                
         except Exception as e:
-            logger.error(f"❌ Error extracting JSON: {e}")
-            return None
+            logger.error(f"Analysis error: {e}")
+            return f"Error: {e}"
     
-    def process_external_data(self, data_source, file_type, analysis_needed):
-        """Download and process external data using Groq"""
-        logger.info(f"📊 Processing external data from {data_source}")
-        
-        # Download the file
-        file_content = self.download_file(data_source)
-        if not file_content:
-            return None
-        
-        prompt = f"""I've downloaded a {file_type} file. Here's what I need to do:
-
-Analysis Required: {analysis_needed}
-
-Please:
-1. Extract the relevant data from the file
-2. Perform the required analysis
-3. Provide the final answer
-
-Return JSON:
-{{
-    "data_extracted": "summary of data found",
-    "analysis_performed": "what you calculated",
-    "answer": "the final answer",
-    "explanation": "brief explanation"
-}}"""
-
-        try:
-            # Try to decode file as text
-            try:
-                file_text = file_content.decode('utf-8')
-                logger.info(f"📝 Processing text file ({len(file_text)} chars)")
-                full_prompt = f"{prompt}\n\nFile Contents:\n{file_text[:30000]}"
-            except:
-                # Binary file - convert to base64
-                logger.info(f"🔢 Processing binary file")
-                file_b64 = base64.b64encode(file_content).decode('utf-8')
-                full_prompt = f"{prompt}\n\nFile (base64, first 3000 chars): {file_b64[:3000]}..."
-            
-            messages = [
-                {"role": "system", "content": "You are a data analysis expert."},
-                {"role": "user", "content": full_prompt}
-            ]
-            
-            if self.conversation_history:
-                messages = [{"role": "system", "content": "You are a data analysis expert."}] + self.conversation_history + [{"role": "user", "content": full_prompt}]
-            
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=0.1,
-                max_tokens=4096
-            )
-            
-            response_text = response.choices[0].message.content
-            logger.info(f"✅ Data analysis complete: {response_text[:500]}...")
-            
-            result = self.extract_json(response_text)
-            
-            # Update conversation history
-            self.conversation_history.append({"role": "user", "content": full_prompt})
-            self.conversation_history.append({"role": "assistant", "content": response_text})
-            
-            return result
-            
-        except Exception as e:
-            logger.error(f"❌ Error processing data: {e}", exc_info=True)
-            return None
-    
-    def submit_answer(self, submit_url, answer):
-        """Submit the answer to the quiz endpoint"""
-        logger.info(f"📤 Submitting answer to: {submit_url}")
-        logger.info(f"💬 Answer: {json.dumps(answer, indent=2) if isinstance(answer, dict) else answer}")
+    def submit_answer(self, answer):
+        """Tool: Submit answer to quiz"""
+        logger.info(f"📤 Submitting answer: {answer}")
         
         payload = {
             "email": self.email,
@@ -313,101 +151,135 @@ Return JSON:
             "answer": answer
         }
         
-        max_retries = 2
-        for attempt in range(max_retries):
-            try:
-                response = requests.post(
-                    submit_url,
-                    json=payload,
-                    headers={'Content-Type': 'application/json'},
-                    timeout=30
-                )
-                
-                logger.info(f"📡 Submit response: {response.status_code}")
-                logger.info(f"📨 Response: {response.text}")
-                
-                if response.status_code == 200:
-                    return response.json()
-                else:
-                    if attempt < max_retries - 1:
-                        logger.info(f"🔄 Retrying...")
-                        time.sleep(2)
-                    else:
-                        return None
-                    
-            except Exception as e:
-                logger.error(f"❌ Error submitting: {e}")
-                if attempt < max_retries - 1:
-                    time.sleep(2)
-                else:
-                    return None
-    
-    def check_time_limit(self):
-        """Check if within 3-minute time limit"""
-        if self.start_time is None:
-            return True
-        
-        elapsed = time.time() - self.start_time
-        remaining = 180 - elapsed
-        
-        if remaining <= 0:
-            logger.warning("⏰ Time limit exceeded")
-            return False
-        
-        logger.info(f"⏱️  Time: {elapsed:.1f}s / 180s ({remaining:.1f}s remaining)")
-        return True
-    
-    def solve_single_quiz(self, url):
-        """Solve a single quiz"""
-        if not self.check_time_limit():
-            return None
-        
-        self.current_url = url
-        
         try:
-            # Fetch quiz page
-            quiz_content = self.fetch_quiz_page(url)
-            if not quiz_content:
-                return None
+            response = requests.post(
+                "https://tds-llm-analysis.s-anand.net/submit",
+                json=payload,
+                headers={'Content-Type': 'application/json'},
+                timeout=30
+            )
             
-            # Analyze with Groq
-            solution = self.solve_with_groq(quiz_content)
-            if not solution:
-                return None
-            
-            logger.info(f"📋 Solution:\n{json.dumps(solution, indent=2)}")
-            
-            # Get answer
-            answer = solution.get('answer')
-            
-            # Process external data if needed
-            if solution.get('needs_external_data') and (answer is None or (isinstance(answer, str) and "cannot" in answer.lower())):
-                data_source = solution.get('data_source')
-                file_type = solution.get('file_type')
-                analysis_needed = solution.get('analysis_needed')
-                
-                if data_source:
-                    logger.info(f"📊 Processing external data from: {data_source}")
-                    result = self.process_external_data(data_source, file_type, analysis_needed)
-                    if result:
-                        answer = result.get('answer')
-                        logger.info(f"✅ External data processed, answer: {answer}")
-            
-            if answer is None:
-                logger.error("❌ No answer determined")
-                return None
-            
-            # Submit answer
-            submit_url = solution.get('submit_url')
-            if not submit_url:
-                logger.error("❌ No submit URL")
-                return None
-            
-            return self.submit_answer(submit_url, answer)
+            logger.info(f"📡 Response: {response.status_code}")
+            result = response.json()
+            logger.info(f"📨 {result}")
+            return result
             
         except Exception as e:
-            logger.error(f"❌ Error: {e}", exc_info=True)
-            return None
+            logger.error(f"Submit error: {e}")
+            return {"error": str(e)}
+    
+    def query_llm_robust(self, messages):
+        """Call LLM with model fallback"""
+        for model in self.AVAILABLE_MODELS:
+            try:
+                logger.info(f"🤖 Using model: {model}")
+                response = self.client.chat.completions.create(
+                    model=model,
+                    messages=messages,
+                    temperature=0.1,
+                    max_tokens=2048
+                )
+                return response.choices[0].message.content
+            except Exception as e:
+                error_msg = str(e)
+                if "429" in error_msg or "rate" in error_msg.lower():
+                    logger.warning(f"⚠️  {model} rate limited, trying next...")
+                    continue
+                else:
+                    raise e
+        
+        raise Exception("All models failed or rate limited")
+    
+    def solve_single_quiz(self, url):
+        """Solve a single quiz using agent loop"""
+        self.current_url = url
+        
+        messages = [
+            {"role": "system", "content": self.SYSTEM_PROMPT},
+            {"role": "user", "content": f"Solve this quiz: {url}\nEmail: {self.email}"}
+        ]
+        
+        max_steps = 10
+        for step in range(max_steps):
+            logger.info(f"\n{'='*50}")
+            logger.info(f"Step {step + 1}/{max_steps}")
+            logger.info(f"{'='*50}")
+            
+            try:
+                # Get AI decision
+                ai_response = self.query_llm_robust(messages)
+                messages.append({"role": "assistant", "content": ai_response})
+                
+                # Parse decision
+                try:
+                    # Try to extract JSON
+                    if "```json" in ai_response:
+                        start = ai_response.find("```json") + 7
+                        end = ai_response.find("```", start)
+                        json_text = ai_response[start:end].strip()
+                    elif "```" in ai_response:
+                        start = ai_response.find("```") + 3
+                        end = ai_response.find("```", start)
+                        json_text = ai_response[start:end].strip()
+                    else:
+                        json_text = ai_response
+                    
+                    command = json.loads(json_text)
+                except json.JSONDecodeError:
+                    logger.warning("⚠️  Invalid JSON from AI")
+                    messages.append({"role": "user", "content": "Error: Return valid JSON only"})
+                    continue
+                
+                tool_name = command.get("tool_name")
+                params = command.get("parameters", {})
+                thought = command.get("thought", "")
+                
+                logger.info(f"💭 Thought: {thought}")
+                logger.info(f"🔧 Tool: {tool_name}")
+                logger.info(f"📝 Params: {params}")
+                
+                # Execute tool
+                result = None
+                
+                if tool_name == "navigate":
+                    result = self.navigate(params.get("url"))
+                    
+                elif tool_name == "download_file":
+                    result = self.download_file(params.get("url"))
+                    
+                elif tool_name == "analyze_data":
+                    result = self.analyze_data(
+                        params.get("data"),
+                        params.get("cutoff")
+                    )
+                    
+                elif tool_name == "submit_answer":
+                    result = self.submit_answer(params.get("answer"))
+                    
+                    # Check if done
+                    if isinstance(result, dict):
+                        if result.get("correct"):
+                            logger.info("✅ Answer CORRECT!")
+                            return result
+                        else:
+                            logger.warning(f"❌ Answer INCORRECT: {result.get('reason')}")
+                            return result
+                
+                else:
+                    result = {"error": f"Unknown tool: {tool_name}"}
+                
+                # Add result to conversation
+                messages.append({
+                    "role": "user",
+                    "content": f"Tool result: {json.dumps(result) if isinstance(result, dict) else str(result)[:500]}"
+                })
+                
+            except Exception as e:
+                logger.error(f"❌ Step error: {e}", exc_info=True)
+                messages.append({"role": "user", "content": f"Error: {str(e)}"})
+        
+        logger.error("Max steps reached without solution")
+        return None
     
     def solve_quiz_chain(self, initial_url):
         """Solve chain of quizzes"""
@@ -418,12 +290,12 @@ Return JSON:
         correct_count = 0
         
         logger.info(f"\n{'='*70}")
-        logger.info(f"🚀 Starting Quiz Chain with Groq (Llama 3.3 70B)")
+        logger.info(f"🚀 Starting Enhanced Quiz Solver")
         logger.info(f"📍 Initial URL: {initial_url}")
-        logger.info(f"⚡ Using OpenAI-compatible API (stable!)")
+        logger.info(f"⚡ Using Groq with model fallback")
         logger.info(f"{'='*70}\n")
         
-        while current_url and self.check_time_limit():
+        while current_url:
             quiz_count += 1
             logger.info(f"\n{'='*70}")
             logger.info(f"📝 Quiz #{quiz_count}: {current_url}")
@@ -432,7 +304,7 @@ Return JSON:
             result = self.solve_single_quiz(current_url)
             
             if result is None:
-                logger.error("❌ Failed, stopping")
+                logger.error("❌ Failed to solve quiz")
                 break
             
             if result.get('correct'):
@@ -441,16 +313,15 @@ Return JSON:
             else:
                 logger.warning(f"❌ Quiz #{quiz_count} INCORRECT: {result.get('reason')}")
             
-            # Next quiz
+            # Get next URL
             next_url = result.get('url')
-            if next_url:
+            if next_url and next_url != current_url:
                 logger.info(f"➡️  Next: {next_url}")
                 current_url = next_url
+                time.sleep(1)
             else:
                 logger.info("🏁 Chain complete!")
                 break
-            
-            time.sleep(1)
         
         # Summary
         elapsed = time.time() - self.start_time
@@ -464,5 +335,5 @@ Return JSON:
         logger.info(f"❌ Incorrect: {quiz_count - correct_count}")
         logger.info(f"📈 Success: {success_rate:.1f}%")
         logger.info(f"⏱️  Time: {elapsed:.1f}s")
-        logger.info(f"🤖 Model: Groq Llama 3.3 70B (via OpenAI API)")
+        logger.info(f"🤖 Model: Groq (multi-model fallback)")
         logger.info(f"{'='*70}\n")
