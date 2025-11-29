@@ -51,9 +51,11 @@ class GroqQuizSolver:
 AVAILABLE TOOLS:
 1. "navigate": {"url": "string"} - Scrapes the page, returns text and links
 2. "download_file": {"url": "string"} - Downloads CSV/data files
-3. "python_repl": {"code": "string"} - Executes Python code (pandas available as pd)
-4. "analyze_data": {"data": "string", "cutoff": "number"} - Analyzes CSV data with cutoff
-5. "submit_answer": {"answer": "any"} - Submits final answer
+3. "transcribe_audio": {"audio_url": "string"} - Transcribes audio files using Groq Whisper
+4. "analyze_image": {"image_url": "string", "question": "string"} - Analyzes images (limited)
+5. "python_repl": {"code": "string"} - Executes Python code (pandas available as pd)
+6. "analyze_data": {"data": "string", "cutoff": "number"} - Analyzes CSV data with cutoff
+7. "submit_answer": {"answer": "any"} - Submits final answer
 
 IMPORTANT RULES:
 - The "answer" parameter should be ONLY the actual answer value (string, number, etc.)
@@ -138,6 +140,55 @@ EXAMPLES:
             driver.quit()
     
     def download_file(self, url):
+        """Tool: Download a file from URL"""
+        logger.info(f"⬇️  Downloading: {url}")
+        try:
+            response = requests.get(url, timeout=30)
+            response.raise_for_status()
+            return response.text
+        except Exception as e:
+            logger.error(f"Download error: {e}")
+            return f"Error: {e}"
+    
+    def transcribe_audio(self, audio_url):
+        """Tool: Download and transcribe audio file using Groq Whisper"""
+        logger.info(f"🎵 Transcribing audio: {audio_url}")
+        try:
+            # Download audio file
+            response = requests.get(audio_url, timeout=30)
+            response.raise_for_status()
+            
+            # Save to temp file
+            import tempfile
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.mp3') as tmp:
+                tmp.write(response.content)
+                audio_path = tmp.name
+            
+            try:
+                # Transcribe using Groq Whisper
+                with open(audio_path, 'rb') as audio_file:
+                    transcription = self.client.audio.transcriptions.create(
+                        model="whisper-large-v3",
+                        file=audio_file,
+                        response_format="text"
+                    )
+                logger.info(f"✅ Transcription: {transcription}")
+                return str(transcription)
+            finally:
+                # Clean up temp file
+                os.unlink(audio_path)
+                
+        except Exception as e:
+            logger.error(f"Audio transcription error: {e}", exc_info=True)
+            return f"Error: {e}"
+    
+    def analyze_image(self, image_url, question="What do you see in this image?"):
+        """Tool: Analyze image - placeholder for vision API"""
+        logger.info(f"🖼️  Analyzing image: {image_url}")
+        logger.warning("⚠️  Image analysis not fully implemented")
+        return f"Image at {image_url} downloaded but vision analysis requires additional API"
+    
+    def python_repl(self, code):
         """Tool: Download file from URL"""
         logger.info(f"⬇️  Downloading: {url}")
         try:
@@ -341,6 +392,15 @@ EXAMPLES:
                     
                 elif tool_name == "download_file":
                     result = self.download_file(params.get("url"))
+                    
+                elif tool_name == "transcribe_audio":
+                    result = self.transcribe_audio(params.get("audio_url"))
+                    
+                elif tool_name == "analyze_image":
+                    result = self.analyze_image(
+                        params.get("image_url"),
+                        params.get("question", "What do you see?")
+                    )
                     
                 elif tool_name == "python_repl":
                     result = self.python_repl(params.get("code"))
